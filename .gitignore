@@ -65,6 +65,3 @@ output/
 simulation_output/
 runs/
 *.log
-
-# Git workflow test scratch
-git-workflow-test.txt
