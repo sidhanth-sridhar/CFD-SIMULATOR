@@ -14,6 +14,18 @@ add_library(cfd_app STATIC
     Panels.cpp
     Theme.cpp)
 
+# Trackpad pinch is not a GLFW concept, so it needs the native window. On macOS
+# that means a small Objective-C++ translation unit; everywhere else a stub
+# keeps the interface available and the behaviour unchanged.
+if(APPLE)
+  enable_language(OBJCXX)
+  target_sources(cfd_app PRIVATE PlatformGestures.mm)
+  # ARC, so the gesture objects need no manual retain/release.
+  set_source_files_properties(PlatformGestures.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+else()
+  target_sources(cfd_app PRIVATE PlatformGesturesStub.cpp)
+endif()
+
 add_library(cfd::app ALIAS cfd_app)
 
 target_include_directories(cfd_app
@@ -44,6 +56,8 @@ target_compile_definitions(cfd_app PRIVATE GLFW_INCLUDE_NONE)
 # is the only portable option here; Metal would mean a second renderer.
 if(APPLE)
   target_compile_definitions(cfd_app PRIVATE GL_SILENCE_DEPRECATION)
+  # AppKit, for the magnification gesture recogniser.
+  target_link_libraries(cfd_app PRIVATE "-framework Cocoa")
 endif()
 
 # ---------------------------------------------------------------------------

@@ -277,10 +277,37 @@ void drawAirfoil(ImDrawList* draw, const UiState& ui, ImVec2 origin) {
   }
 
   if (ui.geometry.fillSection) {
-    // Concave, not convex: an airfoil is not a convex polygon, and the convex
-    // filler would produce a shape with the camber bridged over.
-    draw->AddConcavePolyFilled(screen.data(), static_cast<int>(screen.size()),
-                               ImGui::GetColorU32(theme::kAirfoilFill));
+    // Fill as a strip of quads between corresponding upper and lower surface
+    // points, rather than by handing the outline to a general polygon filler.
+    //
+    // Dear ImGui's AddConcavePolyFilled ear-clips an arbitrary polygon. That
+    // is O(n^2) and numerically fragile on a shape as thin and as finely
+    // sampled as an aerofoil: at a few hundred points per surface, and
+    // especially on strongly cambered sections such as NACA 9410, it emits
+    // triangles that spill well outside the outline.
+    //
+    // No general triangulation is needed here. The section is *defined* as two
+    // surfaces evaluated at the same chordwise stations, so the region between
+    // them tiles exactly into quads - no search, no heuristics, and linear in
+    // the point count. Anti-aliasing is switched off for the fill so that
+    // adjacent triangles meet exactly instead of blending against each other
+    // along every shared edge; the outline drawn afterwards keeps the visible
+    // silhouette smooth.
+    const std::vector<Vec2>& upper = foil.upper();
+    const std::vector<Vec2>& lower = foil.lower();
+    const ImU32 fill = ImGui::GetColorU32(theme::kAirfoilFill);
+
+    const ImDrawListFlags savedFlags = draw->Flags;
+    draw->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+    for (std::size_t i = 0; i + 1 < upper.size(); ++i) {
+      const ImVec2 a = toScreen(upper[i]);
+      const ImVec2 b = toScreen(upper[i + 1]);
+      const ImVec2 c = toScreen(lower[i + 1]);
+      const ImVec2 d = toScreen(lower[i]);
+      draw->AddTriangleFilled(a, b, c, fill);
+      draw->AddTriangleFilled(a, c, d, fill);
+    }
+    draw->Flags = savedFlags;
   }
 
   if (ui.geometry.showChordLine) {
@@ -491,7 +518,7 @@ void drawToolbar(UiState& ui) {
 
   // Right-aligned reminder of what the mouse does, in place of a tooltip the
   // user has to hunt for.
-  const char* hint = "drag: pan    wheel: zoom";
+  const char* hint = "drag: pan    wheel or pinch: zoom";
   const float hintWidth = ImGui::CalcTextSize(hint).x;
   ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - hintWidth);
   ImGui::TextColored(theme::kTextDisabled, "%s", hint);
@@ -734,14 +761,28 @@ void drawViewport(UiState& ui) {
     ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
   }
 
-  if (hovered && io.MouseWheel != 0.0f) {
-    // Geometric steps, so one notch is the same proportional change at every
-    // zoom level - the behaviour that feels linear to a user.
-    const double factor = std::pow(1.15, static_cast<double>(io.MouseWheel));
+  if (hovered) {
     const Vec2 anchor{static_cast<double>(io.MousePos.x - origin.x),
                       static_cast<double>(io.MousePos.y - origin.y)};
-    ui.camera.zoomAboutScreenPoint(factor, anchor);
+
+    if (io.MouseWheel != 0.0f) {
+      // Geometric steps, so one notch is the same proportional change at every
+      // zoom level - the behaviour that feels linear to a user.
+      const double factor = std::pow(1.15, static_cast<double>(io.MouseWheel));
+      ui.camera.zoomAboutScreenPoint(factor, anchor);
+    }
+
+    if (ui.pinchMagnification != 0.0) {
+      // The platform reports a pinch as a relative size change, so the factor
+      // it asks for is 1 + magnification. Clamped because a fast gesture can
+      // deliver a large accumulated value in a single frame.
+      const double factor = std::clamp(1.0 + ui.pinchMagnification, 0.2, 5.0);
+      ui.camera.zoomAboutScreenPoint(factor, anchor);
+    }
   }
+  // Consumed whether or not the cursor was over the canvas, so a pinch that
+  // began elsewhere cannot be applied later.
+  ui.pinchMagnification = 0.0;
 
   ui.cursorInViewport = hovered;
   if (hovered) {

@@ -88,6 +88,10 @@ struct UiState {
   bool showScaleBar{true};
   bool cursorInViewport{false};
   Vec2 cursorWorld{};
+  /// Trackpad magnification collected since the previous frame, as a relative
+  /// change. Drained once per frame by the application so that the viewport is
+  /// the only thing that consumes it.
+  double pinchMagnification{0.0};
 
   // --- console ---
   bool autoScroll{true};

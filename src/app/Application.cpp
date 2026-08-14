@@ -41,6 +41,7 @@
 #endif
 
 #include "Panels.hpp"
+#include "PlatformGestures.hpp"
 #include "Theme.hpp"
 #include "cfd/core/BuildInfo.hpp"
 #include "cfd/core/Log.hpp"
@@ -339,6 +340,9 @@ void Application::Impl::drawFrame() {
   // readout in the panel can never disagree within a frame.
   updateGeometry(ui);
 
+  // Drain any trackpad pinch once per frame; the viewport applies and clears it.
+  ui.pinchMagnification += platform::consumePinchMagnification();
+
   if (ImGui::BeginMainMenuBar()) {
     drawMenuBar(ui);
     ImGui::EndMainMenuBar();
@@ -420,6 +424,11 @@ Status Application::initialize(const ApplicationOptions& options) {
 
   glfwMakeContextCurrent(impl_->window);
   glfwSwapInterval(1);  // vsync: cap redraws at the display refresh rate
+
+  // Trackpad pinch, which GLFW does not report. No-op where unsupported.
+  const bool pinchAvailable = platform::installGestureHandlers(impl_->window);
+  CFD_LOG_DEBUG(kLogCategory, "trackpad pinch zoom {}",
+                pinchAvailable ? "enabled" : "unavailable on this platform");
 
   impl_->ui.renderer.vendor = glStringOrUnknown(GL_VENDOR);
   impl_->ui.renderer.renderer = glStringOrUnknown(GL_RENDERER);
