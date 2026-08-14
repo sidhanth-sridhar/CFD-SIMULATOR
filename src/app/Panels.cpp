@@ -5,11 +5,14 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <format>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "cfd/core/BuildInfo.hpp"
+#include "cfd/geom/Naca4.hpp"
 
 namespace cfd::app {
 namespace {
@@ -209,6 +212,116 @@ void drawGridAndAxes(ImDrawList* draw, const UiState& ui, ImVec2 origin, ImVec2 
   }
 }
 
+// --- geometry drawing -----------------------------------------------------
+
+/// Straight line broken into dashes of a fixed pixel length. Used for the
+/// chord and camber lines so they read as construction references rather than
+/// as part of the surface.
+void addDashedPolyline(ImDrawList* draw, const std::vector<ImVec2>& points, ImU32 colour,
+                       float thickness, float dashPx = 7.0f, float gapPx = 5.0f) {
+  const float period = dashPx + gapPx;
+  float travelled = 0.0f;  // arc length carried across segment boundaries
+
+  for (std::size_t i = 0; i + 1 < points.size(); ++i) {
+    const ImVec2 a = points[i];
+    const ImVec2 b = points[i + 1];
+    const float dx = b.x - a.x;
+    const float dy = b.y - a.y;
+    const float segmentLength = std::sqrt(dx * dx + dy * dy);
+    if (segmentLength <= 0.0f) {
+      continue;
+    }
+
+    float position = 0.0f;
+    while (position < segmentLength) {
+      // Where we are within the current dash/gap cycle.
+      const float phase = std::fmod(travelled + position, period);
+      const float remaining = (phase < dashPx) ? (dashPx - phase) : (period - phase);
+      const float step = std::min(remaining, segmentLength - position);
+
+      if (phase < dashPx) {
+        const float t0 = position / segmentLength;
+        const float t1 = (position + step) / segmentLength;
+        draw->AddLine(ImVec2(a.x + dx * t0, a.y + dy * t0),
+                      ImVec2(a.x + dx * t1, a.y + dy * t1), colour, thickness);
+      }
+      position += step;
+    }
+    travelled += segmentLength;
+  }
+}
+
+/// Draw the generated section: fill, outline, construction lines and markers.
+void drawAirfoil(ImDrawList* draw, const UiState& ui, ImVec2 origin) {
+  if (!ui.geometry.airfoil.has_value()) {
+    return;
+  }
+  const geom::Airfoil& foil = *ui.geometry.airfoil;
+
+  const auto toScreen = [&](const Vec2& world) {
+    const Vec2 s = ui.camera.worldToScreen(world);
+    return ImVec2(static_cast<float>(static_cast<double>(origin.x) + s.x),
+                  static_cast<float>(static_cast<double>(origin.y) + s.y));
+  };
+
+  // The contour repeats its first point to close the loop; ImGui closes the
+  // shape itself, so hand it only the distinct points.
+  const std::vector<Vec2>& contour = foil.contour();
+  std::vector<ImVec2> screen;
+  screen.reserve(contour.size());
+  for (std::size_t i = 0; i + 1 < contour.size(); ++i) {
+    screen.push_back(toScreen(contour[i]));
+  }
+  if (screen.size() < 3) {
+    return;
+  }
+
+  if (ui.geometry.fillSection) {
+    // Concave, not convex: an airfoil is not a convex polygon, and the convex
+    // filler would produce a shape with the camber bridged over.
+    draw->AddConcavePolyFilled(screen.data(), static_cast<int>(screen.size()),
+                               ImGui::GetColorU32(theme::kAirfoilFill));
+  }
+
+  if (ui.geometry.showChordLine) {
+    const std::vector<ImVec2> chord{toScreen(Vec2{0.0, 0.0}),
+                                    toScreen(Vec2{foil.chord(), 0.0})};
+    addDashedPolyline(draw, chord, ImGui::GetColorU32(theme::kChordLine), 1.0f);
+  }
+
+  if (ui.geometry.showCamberLine && !foil.designation().isSymmetric()) {
+    // Omitted for symmetric sections, where it would sit exactly on the chord
+    // line and only produce a shimmering overlap.
+    std::vector<ImVec2> camber;
+    camber.reserve(foil.camberLine().size());
+    for (const Vec2& point : foil.camberLine()) {
+      camber.push_back(toScreen(point));
+    }
+    addDashedPolyline(draw, camber, ImGui::GetColorU32(theme::kCamberLine), 1.4f);
+  }
+
+  // Argument order is (colour, thickness, flags) as of ImGui 1.92.8.
+  draw->AddPolyline(screen.data(), static_cast<int>(screen.size()),
+                    ImGui::GetColorU32(theme::kAirfoilOutline), 1.6f, ImDrawFlags_Closed);
+
+  if (ui.geometry.showSurfacePoints) {
+    const ImU32 colour = ImGui::GetColorU32(theme::kSurfacePoint);
+    for (const ImVec2& point : screen) {
+      draw->AddRectFilled(ImVec2(point.x - 1.5f, point.y - 1.5f),
+                          ImVec2(point.x + 1.5f, point.y + 1.5f), colour);
+    }
+  }
+
+  // Leading and trailing edge markers, as small crosses.
+  const ImU32 markerColour = ImGui::GetColorU32(theme::kMarker);
+  for (const Vec2& world : {foil.leadingEdge(), foil.trailingEdge()}) {
+    const ImVec2 p = toScreen(world);
+    constexpr float r = 4.0f;
+    draw->AddLine(ImVec2(p.x - r, p.y), ImVec2(p.x + r, p.y), markerColour, 1.0f);
+    draw->AddLine(ImVec2(p.x, p.y - r), ImVec2(p.x, p.y + r), markerColour, 1.0f);
+  }
+}
+
 /// A conventional CAD scale bar: a segment of known physical length with its
 /// value printed. It stays meaningful regardless of zoom or window size, which
 /// a bare "zoom %" number does not.
@@ -244,10 +357,58 @@ void drawScaleBar(ImDrawList* draw, const UiState& ui, ImVec2 origin, ImVec2 siz
 // ---------------------------------------------------------------------------
 
 void resetView(UiState& ui) {
-  // Frame roughly two chord lengths around the origin. A NACA section is
-  // conventionally defined on a unit chord from x = 0 to x = 1, so this is the
-  // region the geometry will occupy in Phase 1.
+  if (ui.geometry.airfoil.has_value()) {
+    // Fit the section itself. frameBox preserves the aspect ratio, so a thin
+    // profile ends up limited by its chord and centred vertically - which is
+    // how airfoils are conventionally presented.
+    const auto [minimum, maximum] = ui.geometry.airfoil->bounds();
+    ui.camera.frameBox(minimum, maximum, 0.08);
+    return;
+  }
+
+  // Nothing generated yet: frame the region a unit-chord section would occupy.
   ui.camera.frameBox(Vec2{-0.35, -0.55}, Vec2{1.35, 0.55}, 0.06);
+}
+
+void updateGeometry(UiState& ui) {
+  GeometryState& state = ui.geometry;
+  if (!state.dirty) {
+    return;
+  }
+  state.dirty = false;
+
+  const geom::AirfoilOptions options{
+      .pointsPerSurface = state.pointsPerSurface,
+      .chord = state.chord,
+      .trailingEdge = state.trailingEdge,
+  };
+
+  Result<geom::Airfoil> generated =
+      geom::makeNaca4Digit(std::string_view{state.designation.data()}, options);
+
+  if (!generated) {
+    // Report the problem but keep the previous shape on screen. Regeneration
+    // runs on every keystroke, and "2412" passes through "2", "24" and "241"
+    // on the way - blanking the viewport for each would be unusable.
+    state.errorMessage = generated.error().message();
+    return;
+  }
+
+  state.errorMessage.clear();
+  const bool isFirst = !state.airfoil.has_value();
+  state.airfoil = std::move(generated).value();
+
+  CFD_LOG_INFO(kLogCategory,
+               "{}: max thickness {:.4f} c at {:.3f} c, max camber {:.4f} c, {} points",
+               state.airfoil->designation().name(),
+               state.airfoil->maxThickness() / state.airfoil->chord(),
+               state.airfoil->maxThicknessPosition(),
+               state.airfoil->maxCamber() / state.airfoil->chord(),
+               state.airfoil->contour().size() - 1);
+
+  if (isFirst && ui.viewInitialized) {
+    resetView(ui);
+  }
 }
 
 void resetLayout(UiState& ui) {
@@ -340,6 +501,118 @@ void drawToolbar(UiState& ui) {
 // Session panel
 // ---------------------------------------------------------------------------
 
+void drawGeometryPanel(UiState& ui) {
+  GeometryState& state = ui.geometry;
+
+  if (!ImGui::CollapsingHeader("Geometry", ImGuiTreeNodeFlags_DefaultOpen)) {
+    return;
+  }
+
+  // --- designation ---
+  ImGui::TextColored(theme::kTextDim, "Section");
+  ImGui::SameLine();
+  ImGui::SetNextItemWidth(-FLT_MIN);
+  if (ui.fonts.mono != nullptr) {
+    ImGui::PushFont(ui.fonts.mono, 0.0f);
+  }
+  if (ImGui::InputTextWithHint("##designation", "NACA 2412", state.designation.data(),
+                               state.designation.size())) {
+    state.dirty = true;
+  }
+  if (ui.fonts.mono != nullptr) {
+    ImGui::PopFont();
+  }
+
+  if (!state.errorMessage.empty()) {
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::kLevelError);
+    ImGui::TextWrapped("%s", state.errorMessage.c_str());
+    ImGui::PopStyleColor();
+  }
+
+  ImGui::Spacing();
+
+  // --- discretisation ---
+  if (beginInfoTable("geometry_inputs", 104.0f)) {
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::TextColored(theme::kTextDim, "Points");
+    ImGui::TableSetColumnIndex(1);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::DragInt("##points", &state.pointsPerSurface, 1.0f, 3, 2001, "%d /surface")) {
+      state.pointsPerSurface = std::clamp(state.pointsPerSurface, 3, 2001);
+      state.dirty = true;
+    }
+
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::TextColored(theme::kTextDim, "Chord");
+    ImGui::TableSetColumnIndex(1);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::DragScalar("##chord", ImGuiDataType_Double, &state.chord, 0.005f, nullptr,
+                          nullptr, "%.4g m")) {
+      state.chord = std::clamp(state.chord, 1e-3, 1e4);
+      state.dirty = true;
+    }
+
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::TextColored(theme::kTextDim, "Trailing edge");
+    ImGui::TableSetColumnIndex(1);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    const bool closed = state.trailingEdge == geom::TrailingEdge::Closed;
+    if (ImGui::BeginCombo("##te", closed ? "Closed" : "Open (standard)")) {
+      if (ImGui::Selectable("Open (standard)", !closed)) {
+        state.trailingEdge = geom::TrailingEdge::Open;
+        state.dirty = true;
+      }
+      if (ImGui::Selectable("Closed", closed)) {
+        state.trailingEdge = geom::TrailingEdge::Closed;
+        state.dirty = true;
+      }
+      ImGui::EndCombo();
+    }
+    ImGui::EndTable();
+  }
+
+  ImGui::Spacing();
+  ImGui::SeparatorText("Display");
+  ImGui::Checkbox("Fill", &state.fillSection);
+  ImGui::SameLine();
+  ImGui::Checkbox("Chord", &state.showChordLine);
+  ImGui::Checkbox("Camber", &state.showCamberLine);
+  ImGui::SameLine();
+  ImGui::Checkbox("Points", &state.showSurfacePoints);
+
+  // --- measured properties ---
+  if (!state.airfoil.has_value()) {
+    return;
+  }
+  const geom::Airfoil& foil = *state.airfoil;
+  const double c = foil.chord();
+
+  ImGui::Spacing();
+  ImGui::SeparatorText("Measured");
+  ImGui::TextColored(theme::kTextDisabled, "From the generated points, per chord.");
+  ImGui::Spacing();
+
+  if (beginInfoTable("geometry_measured", 104.0f)) {
+    infoRow(ui, "Section", foil.designation().name());
+    infoRow(ui, "Thickness", std::format("{:.4f} c at {:.3f} c", foil.maxThickness() / c,
+                                         foil.maxThicknessPosition()));
+    if (foil.designation().isSymmetric()) {
+      infoRow(ui, "Camber", "none (symmetric)");
+    } else {
+      infoRow(ui, "Camber", std::format("{:.4f} c at {:.3f} c", foil.maxCamber() / c,
+                                        foil.maxCamberPosition()));
+    }
+    infoRow(ui, "TE gap", std::format("{:.5f} c", foil.trailingEdgeGap() / c));
+    infoRow(ui, "Area", std::format("{:.5f} c²", foil.area() / (c * c)));
+    infoRow(ui, "Perimeter", std::format("{:.4f} c", foil.perimeter() / c));
+    infoRow(ui, "Points", std::format("{} on contour", foil.contour().size() - 1));
+    ImGui::EndTable();
+  }
+}
+
 void drawSessionPanel(UiState& ui) {
   if (ImGui::CollapsingHeader("Build", ImGuiTreeNodeFlags_DefaultOpen)) {
     if (beginInfoTable("build_info")) {
@@ -383,16 +656,22 @@ void drawSessionPanel(UiState& ui) {
 
   if (ImGui::CollapsingHeader("Pipeline", ImGuiTreeNodeFlags_DefaultOpen)) {
     // The intended solver chain, shown so the structure of the project is
-    // visible from inside it. Every stage is marked as what it is right now:
-    // absent. No progress bars, no placeholder numbers.
-    ImGui::TextColored(theme::kTextDim, "Planned stages. None are implemented.");
-    ImGui::Spacing();
-
-    static constexpr std::array<const char*, 8> kStages{
-        "Geometry (NACA)", "Mesh generation", "Navier-Stokes",
-        "RANS averaging",  "k-omega SST",     "Force integration",
-        "Separation",      "Vortex / stall",
+    // visible from inside it. Stages carry their real status: no progress
+    // bars, no placeholder numbers for anything that does not exist.
+    struct Stage {
+      const char* name;
+      bool implemented;
     };
+    static constexpr std::array<Stage, 8> kStages{{
+        {"Geometry (NACA)", true},
+        {"Mesh generation", false},
+        {"Navier-Stokes", false},
+        {"RANS averaging", false},
+        {"k-omega SST", false},
+        {"Force integration", false},
+        {"Separation", false},
+        {"Vortex / stall", false},
+    }};
 
     if (ImGui::BeginTable("pipeline", 2,
                           ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH |
@@ -401,12 +680,17 @@ void drawSessionPanel(UiState& ui) {
       ImGui::TableSetupColumn("stage", ImGuiTableColumnFlags_WidthStretch);
       ImGui::TableSetupColumn("status", ImGuiTableColumnFlags_WidthFixed, 96.0f);
 
-      for (const char* stage : kStages) {
+      for (const Stage& stage : kStages) {
         ImGui::TableNextRow();
         ImGui::TableSetColumnIndex(0);
-        ImGui::TextColored(theme::kTextDisabled, "%s", stage);
+        ImGui::TextColored(stage.implemented ? theme::kText : theme::kTextDisabled, "%s",
+                           stage.name);
         ImGui::TableSetColumnIndex(1);
-        ImGui::TextColored(theme::kTextDisabled, "not implemented");
+        if (stage.implemented) {
+          ImGui::TextColored(theme::kTextDim, "ready");
+        } else {
+          ImGui::TextColored(theme::kTextDisabled, "not implemented");
+        }
       }
       ImGui::EndTable();
     }
@@ -470,13 +754,12 @@ void drawViewport(UiState& ui) {
   draw->AddRectFilled(origin, far_corner, ImGui::GetColorU32(theme::kViewport));
 
   drawGridAndAxes(draw, ui, origin, size);
+  drawAirfoil(draw, ui, origin);
 
-  // Empty-state notice. The viewport shows an empty coordinate system because
-  // that is genuinely all there is; it must not be dressed up to look like a
-  // result.
-  {
-    const char* primary = "No geometry loaded";
-    const char* secondary = "Geometry, meshing and solver stages are not implemented.";
+  // Empty-state notice, shown only when there is genuinely nothing to draw.
+  if (!ui.geometry.airfoil.has_value()) {
+    const char* primary = "No geometry generated";
+    const char* secondary = "Enter a NACA four-digit designation in the Geometry panel.";
 
     const ImVec2 primarySize = ImGui::CalcTextSize(primary);
     const ImVec2 secondarySize = ImGui::CalcTextSize(secondary);
@@ -615,7 +898,11 @@ void drawConsole(UiState& ui) {
 // ---------------------------------------------------------------------------
 
 void drawStatusBar(UiState& ui) {
-  ImGui::TextColored(theme::kTextDim, "Ready");
+  if (ui.geometry.airfoil.has_value()) {
+    ImGui::TextUnformatted(ui.geometry.airfoil->designation().name().c_str());
+  } else {
+    ImGui::TextColored(theme::kTextDim, "No geometry");
+  }
   ImGui::SameLine();
   ImGui::TextColored(theme::kTextDisabled, "|");
   ImGui::SameLine();

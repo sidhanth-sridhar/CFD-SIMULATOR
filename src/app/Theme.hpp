@@ -53,6 +53,17 @@ inline const ImVec4 kGridMajor{0.204f, 0.220f, 0.235f, 1.00f};
 inline const ImVec4 kAxisX{0.396f, 0.478f, 0.400f, 1.00f};  // desaturated green
 inline const ImVec4 kAxisY{0.478f, 0.427f, 0.400f, 1.00f};  // desaturated warm
 
+// Geometry. The section is the subject of the view, so its outline is the
+// brightest thing on the canvas; the fill stays nearly transparent so the grid
+// remains readable behind it and the shape reads as a profile rather than a
+// solid block.
+inline const ImVec4 kAirfoilFill{0.396f, 0.545f, 0.671f, 0.16f};
+inline const ImVec4 kAirfoilOutline{0.722f, 0.808f, 0.878f, 1.00f};
+inline const ImVec4 kCamberLine{0.816f, 0.639f, 0.400f, 0.90f};   // amber, dashed
+inline const ImVec4 kChordLine{0.478f, 0.514f, 0.549f, 0.75f};    // grey, dashed
+inline const ImVec4 kSurfacePoint{0.596f, 0.729f, 0.831f, 1.00f};
+inline const ImVec4 kMarker{0.796f, 0.451f, 0.427f, 1.00f};       // leading/trailing edge
+
 /// Fixed metrics, in unscaled pixels. DPI scaling is applied by ImGui.
 inline constexpr float kToolbarHeight = 30.0f;
 inline constexpr float kStatusBarHeight = 24.0f;

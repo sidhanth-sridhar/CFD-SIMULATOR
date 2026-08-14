@@ -32,6 +32,7 @@ struct Options {
   bool showVersion{false};
   bool selfCheck{false};
   std::string screenshotPath;
+  std::string section;
 };
 
 void printUsage() {
@@ -45,6 +46,8 @@ void printUsage() {
       "  -V, --version           Show build information and exit\n"
       "      --log-level LEVEL   trace|debug|info|warn|error|critical|off\n"
       "                          (default: info)\n"
+      "      --section NAME      Load a NACA four-digit section at startup,\n"
+      "                          e.g. --section \"NACA 2412\"\n"
       "      --self-check        Run headless startup checks and exit\n"
       "      --screenshot FILE   Render a few frames, save the window to FILE\n"
       "                          as a BMP, then exit\n"
@@ -66,6 +69,13 @@ cfd::Result<Options> parseArguments(std::span<const std::string_view> args) {
       options.showVersion = true;
     } else if (arg == "--self-check") {
       options.selfCheck = true;
+    } else if (arg == "--section") {
+      if (i + 1 >= args.size()) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          "--section requires a designation, e.g. \"NACA 2412\""};
+      }
+      ++i;
+      options.section = std::string{args[i]};
     } else if (arg == "--screenshot") {
       if (i + 1 >= args.size()) {
         return cfd::Error{cfd::ErrorCode::InvalidArgument,
@@ -184,6 +194,7 @@ int main(int argc, char** argv) {
     cfd::app::ApplicationOptions appOptions;
     appOptions.logBuffer = guiLog;
     appOptions.screenshotPath = options.screenshotPath;
+    appOptions.initialSection = options.section;
 
     cfd::app::Application application;
     if (const cfd::Status status = application.initialize(appOptions); !status) {

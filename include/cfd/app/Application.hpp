@@ -42,6 +42,11 @@ struct ApplicationOptions {
   /// Frames to render before capturing. More than one because the first frame
   /// establishes layout and font atlases that later frames depend on.
   int screenshotAfterFrames{3};
+
+  /// Section to load at startup, e.g. "NACA 2412". Empty keeps the default.
+  /// The string is placed in the geometry panel's input, so it is validated
+  /// and reported through the same path as anything typed by hand.
+  std::string initialSection{};
 };
 
 /// Owns the window, the GUI context and the main loop.

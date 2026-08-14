@@ -24,10 +24,13 @@ target_include_directories(cfd_app
         # and are intentionally not on the public include path.
         "${CMAKE_CURRENT_SOURCE_DIR}")
 
+# cfd::geometry is PRIVATE: the viewport draws sections, but Application.hpp
+# exposes nothing from the geometry module, so callers do not inherit it.
 target_link_libraries(cfd_app
     PUBLIC
         cfd::core
     PRIVATE
+        cfd::geometry
         imgui::imgui
         glfw
         OpenGL::GL

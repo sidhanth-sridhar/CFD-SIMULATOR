@@ -12,14 +12,17 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "Theme.hpp"
 #include "cfd/app/Camera2D.hpp"
 #include "cfd/core/Log.hpp"
+#include "cfd/geom/Airfoil.hpp"
 
 namespace cfd::app {
 
@@ -31,6 +34,35 @@ struct RendererInfo {
   std::string glVersion{"unknown"};
   std::string glslVersion{"unknown"};
   std::string windowSystem{"unknown"};  ///< GLFW runtime version string
+};
+
+/// Airfoil inputs, the section they produced, and how it is drawn.
+struct GeometryState {
+  /// Typed by the user. A fixed buffer because ImGui::InputText works on one;
+  /// 32 characters is far more than "NACA 2412" needs. Seeded with a cambered
+  /// section so the window shows a recognisable airfoil on first launch.
+  std::array<char, 32> designation{"2412"};
+
+  int pointsPerSurface{121};
+  double chord{1.0};
+  geom::TrailingEdge trailingEdge{geom::TrailingEdge::Open};
+
+  // Display toggles.
+  bool fillSection{true};
+  bool showCamberLine{true};
+  bool showChordLine{true};
+  bool showSurfacePoints{false};
+
+  /// The last section that generated successfully. Kept on screen while the
+  /// user is midway through typing a new designation, so the view does not
+  /// flash empty on every keystroke.
+  std::optional<geom::Airfoil> airfoil;
+
+  /// Why the current input did not generate, empty when it did.
+  std::string errorMessage;
+
+  /// Set whenever an input changes; consumed by updateGeometry().
+  bool dirty{true};
 };
 
 /// Everything the UI reads or mutates during a frame.
@@ -72,10 +104,17 @@ struct UiState {
   /// long the user sat still.
   float lastFrameCpuMs{0.0f};
 
+  GeometryState geometry;
+
   theme::Fonts fonts;
   RendererInfo renderer;
   std::shared_ptr<RingBufferSink> logBuffer;
 };
+
+/// Regenerate the section if any geometry input changed. Call once per frame
+/// before the panels are drawn, so the viewport and the readout never show
+/// results from different inputs.
+void updateGeometry(UiState& ui);
 
 /// Restore the default view: origin centred, unit chord comfortably framed.
 void resetView(UiState& ui);
@@ -87,6 +126,7 @@ void resetLayout(UiState& ui);
 // active main menu bar).
 void drawMenuBar(UiState& ui);
 void drawToolbar(UiState& ui);
+void drawGeometryPanel(UiState& ui);
 void drawSessionPanel(UiState& ui);
 void drawViewport(UiState& ui);
 void drawConsole(UiState& ui);

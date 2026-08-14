@@ -284,6 +284,7 @@ void Application::Impl::layoutAndDrawPanels() {
     leftWidth = ui.leftPanelWidth;
 
     if (beginPanel("##session", ImVec2(regionX, regionY), ImVec2(leftWidth, regionH))) {
+      drawGeometryPanel(ui);
       drawSessionPanel(ui);
     }
     ImGui::End();
@@ -334,6 +335,10 @@ void Application::Impl::layoutAndDrawPanels() {
 }
 
 void Application::Impl::drawFrame() {
+  // Regenerate before anything is drawn, so the viewport and the measured
+  // readout in the panel can never disagree within a frame.
+  updateGeometry(ui);
+
   if (ImGui::BeginMainMenuBar()) {
     drawMenuBar(ui);
     ImGui::EndMainMenuBar();
@@ -374,6 +379,13 @@ Status Application::initialize(const ApplicationOptions& options) {
   }
 
   impl_->ui.logBuffer = options.logBuffer;
+  if (!options.initialSection.empty()) {
+    auto& buffer = impl_->ui.geometry.designation;
+    const std::size_t copied = std::min(options.initialSection.size(), buffer.size() - 1);
+    std::copy_n(options.initialSection.begin(), copied, buffer.begin());
+    buffer[copied] = '\0';
+    impl_->ui.geometry.dirty = true;
+  }
   impl_->screenshotPath = options.screenshotPath;
   impl_->screenshotAfterFrames = std::max(options.screenshotAfterFrames, 1);
 
