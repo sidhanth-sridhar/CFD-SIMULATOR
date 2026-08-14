@@ -778,3 +778,399 @@ or invoke it by full path. Verify with `cmake --version` (expect 4.4.2).
 - No performance work has been done, and none is warranted yet.
 
 **Next:** Phase 1 — NACA 4-digit geometry generation, on explicit instruction.
+
+---
+
+# Phase 1 — NACA Airfoil Geometry
+
+**Completed:** 2026-08-13
+**Outcome:** 97/97 tests pass; typing `NACA 2412` draws the correct section.
+
+## 1. Scope
+
+This phase turns a four-digit designation into a discrete airfoil outline and
+draws it. It adds a new module, `cfd_geometry`, sitting directly on `cfd_core`
+and knowing nothing about windows or OpenGL.
+
+Still no CFD: no mesh, no discretisation of the flow equations, no solution.
+The geometry is validated against the NACA equations and against calculus, but
+not against wind-tunnel data — §9 says exactly what was and was not checked.
+
+## 2. What was implemented
+
+| Component | Location | Purpose |
+|---|---|---|
+| Designation parsing | `Naca4.hpp/.cpp` | `"NACA 2412"` → validated `Naca4Digit` |
+| NACA equations | `Naca4.hpp/.cpp` | Thickness, camber line, camber slope, cosine spacing |
+| `Airfoil` | `Airfoil.hpp/.cpp` | Surfaces, closed contour, measured properties |
+| Geometry panel | `Panels.cpp` | Designation input, discretisation controls, readout |
+| Viewport rendering | `Panels.cpp` | Fill, outline, camber and chord lines, edge markers |
+| Tests | `Naca4Tests.cpp`, `AirfoilTests.cpp` | 58 new cases |
+
+`Vec2` moved from `cfd::app` into `cfd::core`, so geometry and the viewport can
+exchange coordinates without geometry depending on anything graphical.
+
+---
+
+## 3. The mathematics
+
+### 3.1 The idea: camber and thickness are separate
+
+**Physical meaning.** An airfoil does two jobs that are largely independent.
+Its *curvature* — how much the section arches — mostly determines how much lift
+it makes at a given angle, and in particular whether it still lifts at zero
+incidence. Its *bulk* — how fat it is — mostly determines drag, structural
+depth and how it behaves near stall.
+
+The NACA four-digit family is built on exactly that separation. A section is a
+curved line with a symmetric thickness envelope wrapped around it:
+
+- the **mean camber line** `y_c(x)`, running midway between the two surfaces;
+- the **thickness distribution** `y_t(x)`, the half-thickness laid on
+  symmetrically either side of that line.
+
+This is why the digits split the way they do, and why a symmetric section
+(`0012`) is just the cambered construction with the camber set to zero.
+
+### 3.2 Thickness distribution
+
+**Physical meaning.** How fat the section is at each point along the chord.
+Zero at the nose, rising quickly to a maximum around 30% chord, then tapering
+to the tail.
+
+**The equation** (unit chord, `x` from 0 at the leading edge to 1 at the
+trailing edge):
+
+$$y_t(x) = 5t\left(0.2969\sqrt{x} - 0.1260\,x - 0.3516\,x^2 + 0.2843\,x^3 - 0.1015\,x^4\right)$$
+
+**Each term**
+
+| Symbol | Meaning |
+|---|---|
+| $y_t$ | half-thickness: distance from the camber line to one surface |
+| $t$ | maximum thickness as a fraction of chord (the last two digits ÷ 100) |
+| $x$ | chordwise station, 0 at the leading edge, 1 at the trailing edge |
+| $5t$ | scale factor making the maximum come out at very nearly $t$ |
+
+The **$\sqrt{x}$ term is the important one**. Its derivative is infinite at
+$x = 0$, so the surface meets the leading edge *vertically* rather than in a
+sharp point — that is what gives an airfoil its rounded nose. Physically that
+roundness is what lets the section tolerate a range of angles of attack without
+the flow separating instantly at the nose. The four polynomial terms after it
+are a curve fit, chosen to put the maximum near 30% chord and to bring the
+section back down smoothly at the tail.
+
+Two details worth knowing:
+
+**The maximum is not exactly $t$.** Evaluating the bracket at its peak gives
+0.100028, so $y_t^{max} = 0.50014\,t$ and the full thickness is $1.0003\,t$.
+A 12% section is really 12.004% thick. That is a property of the published fit,
+not an error, and the tests assert the 1.0003 factor explicitly so nobody
+later "corrects" it.
+
+**The trailing edge does not close.** The five coefficients sum to 0.0021
+rather than zero, so $y_t(1) = 0.0105\,t$ and the section ends in a small blunt
+base — 0.25% of chord for a 12% section. This is what the standard equations
+produce and what reference ordinate tables list. Changing the last coefficient
+from $-0.1015$ to $-0.1036$ makes them sum to exactly zero and closes the
+trailing edge to a point. Both are offered, because a blunt base is awkward to
+mesh but the open form is the published one.
+
+### 3.3 Camber line
+
+**Physical meaning.** The skeleton curve the thickness is wrapped around. Its
+height above the chord at each station is what makes the section asymmetric.
+
+**The equations.** Two parabolic arcs joined at the point of maximum camber:
+
+$$y_c(x) = \frac{m}{p^2}\left(2px - x^2\right), \qquad 0 \le x \le p$$
+
+$$y_c(x) = \frac{m}{(1-p)^2}\left((1 - 2p) + 2px - x^2\right), \qquad p \le x \le 1$$
+
+**Each term**
+
+| Symbol | Meaning |
+|---|---|
+| $y_c$ | camber line height above the chord, fraction of chord |
+| $m$ | maximum camber, fraction of chord (first digit ÷ 100) |
+| $p$ | chordwise position of that maximum (second digit ÷ 10) |
+| $x$ | chordwise station |
+
+Both branches are parabolas in $x$; the denominators $p^2$ and $(1-p)^2$ are
+what scale each arc so that it reaches height exactly $m$ at $x = p$. Both give
+$y_c = 0$ at the chord ends and $y_c = m$ at $x = p$ — that identity *is* the
+definition of $m$ and $p$, and the tests assert it to machine precision rather
+than to a tolerance.
+
+Why two arcs rather than one curve? A single parabola would force the camber
+maximum to sit at mid-chord. Splitting at $p$ lets the designer move it, which
+is the whole point of the second digit.
+
+### 3.4 Camber slope
+
+**Physical meaning.** The local inclination of the skeleton curve. Needed
+because the thickness must be measured perpendicular to it.
+
+$$\frac{dy_c}{dx} = \frac{2m}{p^2}(p - x), \qquad \frac{dy_c}{dx} = \frac{2m}{(1-p)^2}(p - x)$$
+
+for the forward and aft branches respectively. Both carry the factor $(p - x)$,
+so both vanish at $x = p$ — as they must at a maximum. The tests compare these
+against a central-difference derivative of `camberLine`, which catches an
+algebra slip in either formula.
+
+Note the slope is *continuous* at the join but its derivative is not: the two
+arcs have different curvature there. That kink is inherent to the four-digit
+family and is one reason the later 5-digit and 6-series sections exist.
+
+### 3.5 Building the surfaces
+
+**Physical meaning.** Wrap the thickness around the skeleton. The thickness is
+a measurement *across* the section, so it must be laid off perpendicular to the
+camber line, not vertically.
+
+With $\theta = \arctan(dy_c/dx)$ the local camber inclination:
+
+$$x_u = x - y_t\sin\theta, \qquad y_u = y_c + y_t\cos\theta$$
+$$x_l = x + y_t\sin\theta, \qquad y_l = y_c - y_t\cos\theta$$
+
+**Each term**
+
+| Symbol | Meaning |
+|---|---|
+| $\theta$ | angle of the camber line to the chord at station $x$ |
+| $y_t\cos\theta$ | the part of the offset that lands across the chord |
+| $y_t\sin\theta$ | the part that lands *along* the chord |
+| $(x_u, y_u)$, $(x_l, y_l)$ | the resulting upper and lower surface points |
+
+The $\sin\theta$ terms are the ones people drop. Offsetting vertically instead —
+$y_u = y_c + y_t$ — is a common shortcut, and it *thins* the section wherever
+the camber line is steep, which is precisely the nose region that matters most.
+It is invisible on a symmetric section, where $\theta = 0$ and the two agree
+exactly, so the mistake survives casual testing. `AirfoilTests` checks
+perpendicularity directly, on cambered sections only, by taking the dot product
+of the upper-minus-lower vector with the camber tangent.
+
+A consequence worth stating because it looks like a bug: because the two
+surfaces are displaced in opposite directions *along* the chord, **the upper
+and lower surfaces of a cambered section do not share x stations.** Near the
+nose $y_t \sim \sqrt{x}$ grows faster than $x$ itself, so the upper surface
+reaches slightly *ahead* of the leading edge point — a fraction of a percent of
+chord. Both behaviours have their own tests, so the next reader meets them as
+documented facts rather than as anomalies.
+
+### 3.6 Cosine spacing
+
+**Physical meaning.** Where to put the points. Curvature is wildly uneven along
+an airfoil: enormous at the nose, almost nil over the middle. Points should go
+where the shape is changing.
+
+$$x_i = \frac{1 - \cos\beta_i}{2}, \qquad \beta_i = \frac{i\pi}{n-1}, \qquad i = 0 \ldots n-1$$
+
+Sampling uniformly in the angle $\beta$ rather than in $x$ maps equal angular
+steps onto stations bunched at both ends. Near the nose, $x \approx \beta^2/4$,
+so $\sqrt{x} \approx \beta/2$ — which means **cosine spacing linearises exactly
+the $\sqrt{x}$ behaviour that makes the nose hard to resolve.** That is not a
+coincidence; it is why every airfoil code uses it. The area refinement study in
+the tests converges cleanly at second order as a result, which it would not do
+with uniform spacing.
+
+This is the first genuinely *numerical* decision in the project: the equations
+are exact, but the moment they are sampled the accuracy of everything
+downstream — panel methods, mesh quality, pressure integration — is set by how
+those points are placed.
+
+### 3.7 Shoelace area, used for validation
+
+**Physical meaning.** The area enclosed by a closed polygon, obtained from its
+vertices alone.
+
+$$A = \frac{1}{2}\sum_i \left(x_i\,y_{i+1} - x_{i+1}\,y_i\right)$$
+
+Each term is twice the signed area of the triangle formed by the origin and one
+edge; contributions outside the polygon cancel. The **sign** encodes traversal
+direction — positive for counter-clockwise — which is how the tests confirm the
+contour ordering without inspecting individual points.
+
+Comparing this against the analytic integral of the thickness polynomial,
+
+$$A = 2\int_0^1 y_t\,dx = 10t\left(\tfrac{2}{3}a_0 + \tfrac{1}{2}a_1 + \tfrac{1}{3}a_2 + \tfrac{1}{4}a_3 + \tfrac{1}{5}a_4\right)$$
+
+is the strongest single check in the suite: it validates the coefficients, the
+surface construction, the point distribution and the contour ordering all at
+once, against calculus rather than against itself.
+
+---
+
+## 4. Design decisions
+
+| Decision | Reason |
+|---|---|
+| `cfd_geometry` is a separate module on `cfd_core` | The mesher and solver will consume geometry from a headless batch run; it must not need a window |
+| `Vec2` promoted to `cfd_core` | Geometry and viewport must share a coordinate type without geometry depending on the GUI |
+| Properties *measured* from generated points | Makes them a check on the geometry rather than a restatement of the input |
+| Open trailing edge is the default | It is what the standard equations produce and what reference tables list; closed is offered for meshing |
+| Contour stores the closing point (`front() == back()`) | Callers can draw or integrate the loop without special-casing the wrap-around |
+| Conventional ordering: TE → upper → LE → lower → TE | The standard airfoil coordinate convention; panel methods expect it |
+| Analytic functions exposed in the header | Lets the tests attack the equations directly, not only through generated geometry |
+| Reject `2012` and `0412` | `2012` divides by zero; `0412` claims a camber position with no camber. Both are user typos worth naming precisely |
+| Keep the last valid shape while typing | Regeneration runs per keystroke; blanking the viewport for `2`, `24`, `241` would be unusable |
+| `Result<Airfoil>` throughout | Bad input is expected, not exceptional — exactly what Phase 0 built the type for |
+
+---
+
+## 5. Problems encountered, and how they were solved
+
+**A wrong test, not wrong code.** Two tests failed asserting that both trailing
+edge points sit at `x = c`. They do not, and should not: on a cambered section
+with an open trailing edge, $y_t(1) \neq 0$ and the camber line is inclined, so
+the perpendicular offset displaces the two points along the chord by
+$\pm y_t(1)\sin\theta$ — for NACA 2412 that is $8.4\times10^{-5}c$, which
+matched the observed failure exactly. Only their *midpoint* is at `x = c`, and
+that is exact because the offsets are equal and opposite. The tests were
+rewritten to assert the midpoint identity, plus a new test pinning the straddle
+to its predicted magnitude and confirming it vanishes for a symmetric section.
+Worth recording because the instinct on a red test is to change the code.
+
+**`AddPolyline` argument order changed.** Dear ImGui 1.92.8 swapped `thickness`
+and `flags`. Because Phase 0 compiled ImGui with
+`IMGUI_DISABLE_OBSOLETE_FUNCTIONS`, the old overload is `= delete` and this was
+a hard compile error naming the exact call — rather than a silent
+reinterpretation of `ImDrawFlags_Closed` as a line thickness. A good advert for
+turning compatibility shims off.
+
+**Concave, not convex.** `AddConvexPolyFilled` is the usual ImGui fill, but an
+airfoil is not convex. Using it bridges the shape across the camber. Switched
+to `AddConcavePolyFilled`.
+
+**Duplicate library on the link line.** `cfd_tests` named both `cfd::core` and
+`cfd::geometry`, and geometry already carries core as a `PUBLIC` dependency, so
+the linker warned about a duplicate. Removed the redundant entries — a reminder
+that in modern CMake you link what you *directly* use and let propagation do
+the rest.
+
+**No way to see other sections.** The designation is typed into the GUI, so
+checking that `0012` and `4412` render correctly meant either editing the
+default or adding a way in. Added `--section`, which seeds the panel's input
+field — so it goes through exactly the same parsing and error path as typed
+input, and later batch runs get section selection for free.
+
+**Live validation feedback.** Regenerating on every keystroke means the input is
+invalid most of the time while typing. Solved by separating "the section shown"
+from "the current input": a failed parse updates the error message but leaves
+the previous geometry on screen.
+
+---
+
+## 6. Technical concepts worth carrying forward
+
+- **Analytic vs discrete.** The NACA equations are exact; the point list is an
+  approximation of them. Every property the program reports is measured from
+  the discrete points, which is why `maxThicknessPosition` reads 0.297 rather
+  than 0.300 — the stations simply do not land on the true maximum. Knowing
+  which numbers are exact and which are sampled is a habit worth having before
+  the solver starts reporting residuals.
+
+- **Convergence as a test.** Asserting one computed area against one expected
+  value only checks a single discretisation. Asserting that the error *falls by
+  roughly four when the spacing halves* checks that the method is
+  second-order — a much stronger statement, and the standard way numerical code
+  is verified.
+
+- **Exact identities are better tests than tolerances.** `y_c(p) = m` and
+  "midpoint of the surfaces lies on the camber line" hold to machine precision
+  because of how the geometry is built. Testing them at `1e-15` catches errors
+  that a loose tolerance would wave through.
+
+- **Symmetric cases hide bugs.** The perpendicular-offset error is invisible on
+  `0012`. Test suites need a case where each term actually does something.
+
+---
+
+## 7. What to understand before Phase 2
+
+Phase 2 generates a mesh around the section.
+
+1. **The contour is the boundary condition.** The closed, correctly-ordered
+   loop from `contour()` is the wall the mesh must wrap. Its ordering and
+   orientation are what let a mesher tell inside from outside.
+2. **Point distribution propagates.** Cosine spacing put points where curvature
+   is; the mesh inherits that. A mesh cell can be no better than the surface
+   discretisation it starts from.
+3. **The blunt trailing edge is a decision you now have to live with.** An open
+   trailing edge means the mesh must either resolve a small base region or the
+   geometry must be regenerated closed. This is why both forms exist in the API.
+4. **Boundary layers are thin.** The physically interesting region near the
+   wall is orders of magnitude thinner than the chord, so mesh spacing normal
+   to the surface will have to be graded very aggressively — the same
+   "put points where the action is" idea as cosine spacing, one dimension out.
+5. **Concepts to read up on:** structured vs unstructured meshes, O-grids and
+   C-grids around airfoils, cell aspect ratio and skewness as quality measures,
+   and what the far-field boundary distance does to a solution.
+
+---
+
+## 8. What I learned
+
+- **Deriving the geometry is easy; knowing which properties are exact is the
+  real work.** The equations took an afternoon. Working out that `y_c(p) = m`
+  holds exactly, that the maximum thickness is `1.0003t` rather than `t`, and
+  that the trailing edge points straddle the chord station on a cambered
+  section — those are what made the tests meaningful instead of decorative.
+
+- **A failing test is a hypothesis, not a verdict.** Two tests failed and the
+  code was right both times. Working out *why* the trailing edge points were
+  displaced by exactly `8.4e-5` turned a red test into a documented property of
+  the geometry.
+
+- **The shortcut that only breaks in the interesting case.** Offsetting
+  thickness vertically instead of perpendicular gives identical results for
+  every symmetric section — so it passes any test suite that only checks
+  `0012`. Correctness testing has to include the case where the term you might
+  have dropped is non-zero.
+
+- **Checking numerics against calculus beats checking them against yourself.**
+  Comparing the shoelace area of the discretised contour with the analytic
+  integral validates four separate things at once, and none of it is circular.
+
+- **Turning off compatibility shims turns silent bugs into compile errors.**
+  The `AddPolyline` signature swap would have been a wrong-looking outline with
+  no diagnostic. Instead it was a one-line fix pointed at exactly.
+
+---
+
+## 9. Status at the end of Phase 1
+
+**Verified by running it**
+
+- Clean configure, build and test from scratch; zero warnings including with
+  `-DCFD_WARNINGS_AS_ERRORS=ON`.
+- 97/97 tests pass (96 in the headless `-DCFD_BUILD_APP=OFF` configuration,
+  which excludes only the application self-check).
+- NACA 0012, 2412, 4412 and 0006 were generated and inspected visually: the
+  symmetric sections are mirror-symmetric, the cambered ones show the expected
+  camber line, all have rounded noses and maximum thickness near 30% chord.
+- Measured properties match the designations: 2412 reports 0.1200c thickness at
+  0.297c and 0.0200c camber at 0.396c.
+- Invalid input (`NACA 24`) is rejected with a specific message and no geometry
+  is drawn.
+
+**Checked numerically**
+
+- Thickness polynomial against the tabulated NACA 0012 ordinate 0.06002c at 30%
+  chord.
+- Camber line reaching exactly `m` at exactly `p`, to machine precision.
+- Camber slope against a central-difference derivative of the camber line.
+- Surface midpoints on the camber line, and thickness perpendicular to it, to
+  `1e-15`.
+- Discretised contour area against the analytic integral, with second-order
+  convergence confirmed over three refinement levels.
+
+**Not verified**
+
+- No comparison against wind-tunnel data, another CFD code, or full published
+  ordinate tables beyond the single station above.
+- No aerodynamic quantity of any kind — no lift, drag, pressure or velocity
+  exists yet.
+- Still only built and run on macOS 15.7 / arm64 / Apple Clang 17.
+
+**Next:** Phase 2 — mesh generation, on explicit instruction.

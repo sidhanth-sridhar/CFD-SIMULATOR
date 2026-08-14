@@ -3,15 +3,16 @@
 A 2D Reynolds-Averaged Navier-Stokes solver for NACA airfoil sections, with an
 interactive viewer.
 
-**Status: Phase 0 — project foundation. No CFD is implemented.**
+**Status: Phase 1 — airfoil geometry. No CFD is implemented.**
 
-What exists today is the scaffolding a solver will be built on: a modular
-CMake build, a core library providing logging and value-based error handling, a
-tested world/screen camera transform, a test suite, and a desktop application
-shell with an empty coordinate viewport. There is no geometry, no mesh, no
-discretisation and no flow solution yet. Nothing in this repository has been
-validated against experimental or reference CFD data, because there is nothing
-yet to validate.
+The application generates and draws NACA four-digit sections. Type a
+designation such as `NACA 2412` and the section appears, along with its
+measured thickness, camber, area and perimeter.
+
+There is still no mesh, no discretisation and no flow solution. The geometry is
+verified against the analytic NACA equations and against calculus (see
+[Validation](#validation)), but nothing here has been compared with wind-tunnel
+or reference CFD data, because nothing here computes a flow.
 
 ---
 
@@ -72,9 +73,26 @@ Add `--output-on-failure` to see diagnostics from failing tests.
 |---|---|
 | `-h`, `--help` | Usage summary |
 | `-V`, `--version` | Version, build type, compiler |
+| `--section NAME` | Load a section at startup, e.g. `--section "NACA 2412"` |
 | `--log-level LEVEL` | `trace`, `debug`, `info`, `warn`, `error`, `critical`, `off` |
 | `--self-check` | Headless subsystem check, then exit (this is what CTest runs) |
 | `--screenshot FILE` | Render a few frames, save the window as a BMP, exit |
+
+### Generating a section
+
+Type a four-digit designation into **Section** in the Geometry panel. The
+`NACA` prefix and any whitespace are optional, so `NACA 2412`, `naca2412` and
+`2412` are equivalent. The shape updates as you type; while the input is
+incomplete the last valid section stays on screen and the problem is reported
+beneath the field.
+
+The four digits are maximum camber in percent of chord, its position in tenths
+of chord, and maximum thickness in percent of chord. So `2412` is 2% camber at
+40% chord and 12% thick, while `0012` is symmetric and 12% thick.
+
+You can also set the number of points per surface, the chord length, and
+whether the trailing edge uses the standard (slightly blunt) polynomial or the
+adjusted closed-trailing-edge form.
 
 ### Viewport controls
 
@@ -96,22 +114,51 @@ CFD-SIMULATOR/
 │   ├── Dependencies.cmake      Hash-pinned FetchContent declarations
 │   └── Version.hpp.in          Template for the generated version header
 ├── include/cfd/                Public headers
-│   ├── core/                   BuildInfo, Error/Result, Log
+│   ├── core/                   BuildInfo, Error/Result, Log, Vec2
+│   ├── geom/                   Naca4, Airfoil
 │   └── app/                    Application, Camera2D
 ├── src/
 │   ├── main.cpp                CLI parsing and startup
 │   ├── core/                   cfd_core — no GUI, no CFD, no platform code
+│   ├── geom/                   cfd_geometry — NACA equations and discretisation
 │   └── app/                    cfd_app — GLFW, OpenGL and Dear ImGui live here only
 └── tests/                      GoogleTest suite, registered with CTest
 ```
 
 ### Module boundaries
 
-`cfd_core` depends on nothing but the standard library. `cfd_app` is the only
-module that knows GLFW, OpenGL or Dear ImGui exist. Solver code added in later
-phases will sit on top of `cfd_core` and stay independent of the GUI, so the
-numerics remain buildable and testable on a machine with no display — which is
-what `-DCFD_BUILD_APP=OFF` verifies.
+```
+cfd_sim ──▶ cfd_app ──▶ cfd_geometry ──▶ cfd_core ──▶ standard library
+                │
+                └──▶ Dear ImGui, GLFW, OpenGL
+```
+
+`cfd_core` depends on nothing but the standard library, and `cfd_geometry`
+depends only on `cfd_core`. `cfd_app` is the only module that knows GLFW,
+OpenGL or Dear ImGui exist. Solver code added in later phases sits at the
+geometry level or below, so the numerics remain buildable and testable on a
+machine with no display — which is what `-DCFD_BUILD_APP=OFF` verifies.
+
+## Validation
+
+The geometry tests check three different kinds of property:
+
+- **Exact construction identities** — the midpoint of corresponding upper and
+  lower surface points lies on the camber line; the line joining them is
+  perpendicular to the camber line; a symmetric section's surfaces are exact
+  mirror images.
+- **Agreement with the designation** — thickness, camber and their chordwise
+  positions are measured back out of the generated points and compared with
+  what the digits specify. The camber line reaches exactly `m` at exactly `p`.
+- **Agreement with calculus** — the area enclosed by the discretised contour,
+  computed with the shoelace formula, is compared against the analytic integral
+  of the thickness polynomial, including a refinement study confirming the
+  error falls quadratically as points are added.
+
+The thickness polynomial is also checked against the tabulated NACA 0012
+ordinate of 0.06002c at 30% chord.
+
+No comparison has been made against wind-tunnel data or another CFD code.
 
 ## Dependencies
 
@@ -127,9 +174,9 @@ reproduces the exact same sources or fails loudly.
 
 ## Roadmap
 
-Phase 0 is complete. Later phases build on it in order:
+Phases 0 and 1 are complete. Later phases build on them in order:
 
-1. NACA 4-digit geometry generation
+1. ~~NACA 4-digit geometry generation~~ — done
 2. Mesh generation around the section
 3. Navier-Stokes discretisation
 4. Reynolds averaging (RANS)
