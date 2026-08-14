@@ -48,8 +48,8 @@ endif()
 # ---------------------------------------------------------------------------
 add_executable(cfd_sim "${PROJECT_SOURCE_DIR}/src/main.cpp")
 
+# cfd::app propagates cfd::core publicly; listing it again would be a duplicate.
 target_link_libraries(cfd_sim
     PRIVATE
         cfd::app
-        cfd::core
         cfd::warnings)

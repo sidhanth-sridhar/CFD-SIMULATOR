@@ -26,16 +26,12 @@
 #include <cmath>
 #include <utility>
 
+#include "cfd/core/Vec2.hpp"
+
 namespace cfd::app {
 
-/// Minimal 2D point. Deliberately not a general linear-algebra type: the
-/// solver will bring its own vector types with different requirements.
-struct Vec2 {
-  double x{0.0};
-  double y{0.0};
-
-  friend constexpr bool operator==(const Vec2&, const Vec2&) = default;
-};
+/// The viewport works in the same coordinate type as the geometry it draws.
+using Vec2 = cfd::Vec2;
 
 /// An orthographic 2D view: a world-space point held at the viewport centre,
 /// and a zoom expressed as pixels per world unit.

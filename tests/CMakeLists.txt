@@ -10,14 +10,18 @@ cfd_add_googletest()
 include(GoogleTest)
 
 add_executable(cfd_tests
+    AirfoilTests.cpp
     BuildInfoTests.cpp
     Camera2DTests.cpp
     ErrorTests.cpp
-    LogTests.cpp)
+    LogTests.cpp
+    Naca4Tests.cpp)
 
+# cfd::geometry already carries cfd::core as a PUBLIC dependency, so naming
+# core again here only makes the linker warn about a duplicate.
 target_link_libraries(cfd_tests
     PRIVATE
-        cfd::core
+        cfd::geometry
         cfd::warnings
         GTest::gtest_main)
 
