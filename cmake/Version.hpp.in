@@ -1,0 +1,21 @@
+// Generated from cmake/Version.hpp.in by CMake. Do not edit the generated copy.
+//
+// Keeping the version in exactly one place (the project() call in the
+// top-level CMakeLists.txt) means the build system, the --version output and
+// the About dialog can never disagree with each other.
+
+#pragma once
+
+#include <string_view>
+
+namespace cfd::version {
+
+inline constexpr int kMajor = @PROJECT_VERSION_MAJOR@;
+inline constexpr int kMinor = @PROJECT_VERSION_MINOR@;
+inline constexpr int kPatch = @PROJECT_VERSION_PATCH@;
+
+inline constexpr std::string_view kString = "@PROJECT_VERSION@";
+inline constexpr std::string_view kProjectName = "@PROJECT_NAME@";
+inline constexpr std::string_view kDescription = "@PROJECT_DESCRIPTION@";
+
+}  // namespace cfd::version

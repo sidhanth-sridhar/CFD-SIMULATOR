@@ -38,6 +38,12 @@ CMakeUserPresets.json
 .Trashes
 *~
 
+# clangd / clang-tidy index
+.cache/
+
+# Screenshots produced by `cfd_sim --screenshot`
+*.bmp
+
 # VS Code (ignore local/user files, keep shared project config)
 .vscode/*
 !.vscode/settings.json
