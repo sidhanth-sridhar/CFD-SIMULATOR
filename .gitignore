@@ -1,0 +1,60 @@
+# Build directories
+build/
+build-*/
+cmake-build-*/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+CMakeUserPresets.json
+
+# Compiled objects and binaries
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.exe
+*.out
+*.app
+
+# Debug / coverage artifacts
+*.gcda
+*.gcno
+*.profraw
+*.profdata
+
+# CFD simulation output data
+*.vtk
+*.vtu
+*.vtp
+*.dat
+*.csv
+*.plt
+*.log
+output/
+results/
+
+# macOS system files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+*.swp
+*~
+
+# IDE / editor files
+.idea/
+.vscode/
+*.code-workspace
+*.xcuserdatad/
+xcuserdata/
+*.xccheckout
+
+# Test / temporary files
+*.log
+git-workflow-test.txt
