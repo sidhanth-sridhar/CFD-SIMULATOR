@@ -1,22 +1,24 @@
-# Build directories
+# CMake / build artifacts
 build/
 build-*/
 cmake-build-*/
-
-# CMake generated files
-CMakeCache.txt
 CMakeFiles/
+CMakeCache.txt
 cmake_install.cmake
-CTestTestfile.cmake
 Makefile
+compile_commands.json
+CTestTestfile.cmake
+Testing/
 CMakeUserPresets.json
 
-# Compiled objects and binaries
+# Compiled binaries
 *.o
 *.obj
 *.a
+*.lib
 *.so
 *.dylib
+*.dll
 *.exe
 *.out
 *.app
@@ -27,34 +29,42 @@ CMakeUserPresets.json
 *.profraw
 *.profdata
 
-# CFD simulation output data
-*.vtk
-*.vtu
-*.vtp
-*.dat
-*.csv
-*.plt
-*.log
-output/
-results/
-
 # macOS system files
 .DS_Store
-.DS_Store?
+.AppleDouble
+.LSOverride
 ._*
 .Spotlight-V100
 .Trashes
-*.swp
 *~
 
-# IDE / editor files
-.idea/
-.vscode/
-*.code-workspace
-*.xcuserdatad/
-xcuserdata/
-*.xccheckout
+# VS Code (ignore local/user files, keep shared project config)
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
 
-# Test / temporary files
+# JetBrains IDEs
+.idea/
+*.iml
+
+# Vim
+*.swp
+*.swo
+
+# Temporary editor files
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# Generated CFD simulation output (large, regenerable)
+# NOTE: reference/validation datasets committed intentionally under data/
+#       and small .csv/.vtk fixtures are NOT ignored globally.
+results/
+output/
+simulation_output/
+runs/
 *.log
+
+# Git workflow test scratch
 git-workflow-test.txt
