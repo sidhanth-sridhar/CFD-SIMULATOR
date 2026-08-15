@@ -1174,3 +1174,379 @@ Phase 2 generates a mesh around the section.
 - Still only built and run on macOS 15.7 / arm64 / Apple Clang 17.
 
 **Next:** Phase 2 — mesh generation, on explicit instruction.
+
+---
+
+# Phase 2 — Computational Domain and Mesh
+
+**Completed:** 2026-08-15
+**Outcome:** 134/134 tests pass; `NACA 2412` produces a valid C-grid with no
+inverted cells at any resolution.
+
+## 1. Scope
+
+This phase builds the computational domain: the region of fluid around the
+section, chopped into cells with all the geometric quantities a finite-volume
+solver needs. It adds `cfd_mesh`, sitting on `cfd_geometry`.
+
+Still no CFD. Nothing here discretises a flow equation or computes a velocity.
+What is verified is that the *domain* is sound — §9 says exactly what was and
+was not checked.
+
+## 2. What was implemented
+
+| Component | Location | Purpose |
+|---|---|---|
+| `Mesh` | `Mesh.hpp/.cpp` | Nodes, cells, faces, metrics, boundary tagging, quality |
+| `buildStructured` | `Mesh.cpp` | Turns a block of nodes into a face-based mesh |
+| C-grid generator | `CGrid.hpp/.cpp` | Domain shape, clustering, marching, boundary tagging |
+| Resolution presets | `CGrid.cpp` | Coarse / Medium / Fine |
+| Mesh panel + renderer | `Panels.cpp` | Controls, statistics, culled and decimated drawing |
+| Tests | `MeshTests.cpp`, `CGridTests.cpp` | 37 new cases |
+
+---
+
+## 3. Why face-based, and why that is the interesting choice
+
+The grid is structured, so every quantity could be recomputed on demand from
+`(i, j)`. It is stored explicitly as a list of faces anyway, because that is
+the shape of the thing a finite-volume method actually consumes.
+
+**Physical meaning.** A finite-volume method does not approximate derivatives
+at points. It enforces conservation over each cell: whatever enters through the
+boundary must accumulate inside. The divergence theorem turns the volume
+integral of a flux divergence into a sum over the cell's boundary,
+
+$$\frac{d}{dt}\int_V u \, dV + \sum_{\text{faces}} (\mathbf{F} \cdot \mathbf{n})\, A = 0$$
+
+**Each term**
+
+| Symbol | Meaning | Units (2D) |
+|---|---|---|
+| $u$ | conserved quantity per unit volume (mass, momentum, energy) | varies |
+| $V$ | cell volume — an *area* in two dimensions | m² |
+| $\mathbf{F}$ | flux of $u$ | varies |
+| $\mathbf{n}$ | outward unit normal of a face | – |
+| $A$ | face area — a *length* in two dimensions | m |
+
+The solver never asks "who are my neighbours in $i$ and $j$". It asks, for each
+face: what is the flux, which cell owns it, and what is on the other side. So
+the mesh stores exactly that. Writing the solver against faces also means an
+unstructured mesh can be substituted later without touching it.
+
+Two conventions are fixed once, which removes a sign question from every flux
+that will ever be assembled:
+
+- The normal always points **out of the owner** — towards the neighbour for an
+  interior face, out of the domain for a boundary face.
+- Cell corners are stored anticlockwise, so the shoelace area is positive
+  whenever the $(i, j)$ parametrisation is right-handed.
+
+In 2D the 3D vocabulary collapses by one order: a "volume" is an area, a face
+"area" is a length. The names are kept because the literature uses them.
+
+### Centroids are not corner averages
+
+The cell value in a finite-volume method lives at the **centroid**, the
+area-weighted first moment:
+
+$$\mathbf{C} = \frac{1}{6A}\sum_i (\mathbf{P}_i + \mathbf{P}_{i+1})\,(x_i y_{i+1} - x_{i+1} y_i)$$
+
+For a square this equals the average of the corners; for a skewed cell it does
+not, and using the corner average would put a first-order error into every
+skewed cell in the mesh. Boundary-layer cells are extremely skewed, so this is
+not a nicety.
+
+---
+
+## 4. Why a C-grid
+
+Two structured topologies are standard for an aerofoil:
+
+- **O-grid** — lines close around the body like tree rings.
+- **C-grid** — lines wrap the nose like the letter C, then run downstream on
+  both sides of a *cut* along the wake.
+
+The C-grid was chosen for two reasons, both of which come straight from the
+requirements:
+
+1. The domain is deliberately asymmetric — 12 chords upstream, 25 downstream.
+   An O-grid has one outer boundary and cannot express that.
+2. The wake is where separation and stall live. A C-grid puts a line of
+   well-aligned, refined cells straight down it; an O-grid's cells behind the
+   trailing edge fan outwards and smear exactly what matters most.
+
+The price is the **wake cut**: a slit from the trailing edge to the outflow,
+opened so the grid can be a topological rectangle. The two sides lie on top of
+each other in space but are separate faces. They are not really a boundary —
+fluid crosses freely — so each stores its `partner`, and a solver will join
+them rather than apply a condition. The tests check the pairing is symmetric,
+coincident, oppositely oriented and bounds different cells.
+
+This is also why the mesher requires a **closed** trailing edge: the cut has to
+start from a single point, and a blunt base leaves a gap the topology cannot
+represent. Phase 1's `TrailingEdge::Closed` existed for exactly this, and the
+application's default moved to it this phase.
+
+### Layout
+
+```
+j = 0      outflow -> wake cut -> TRAILING EDGE -> lower surface ->
+           LEADING EDGE -> upper surface -> TRAILING EDGE -> wake cut -> outflow
+j = max    two straight lines at y = +/- vertical extent, joined round the
+           front by a half ellipse
+i = 0,max  the downstream outflow plane
+```
+
+The trailing edge appears **twice** in the $i$ sequence — once where the lower
+wake meets it and once where the upper wake leaves it. Those two nodes are the
+same point in space. That is not a bug; it is where the slit closes.
+
+---
+
+## 5. Clustering: where the cells go
+
+### Normal to the wall
+
+Layers grow geometrically: each is a fixed multiple of the one before.
+
+$$\text{first} \cdot \frac{r^n - 1}{r - 1} = \text{total}$$
+
+Fixing the first layer height and the total distance determines the ratio $r$
+implicitly, and there is no closed form, so it is solved by bisection — the sum
+is monotone in $r$, so bisection cannot fail. The near-wall spacing has to span
+four orders of magnitude to reach the far field, and a geometric progression is
+the standard way to bridge that without the solver ever seeing an abrupt jump
+in cell size.
+
+Physically this is the whole game for a viscous calculation: the boundary layer
+is resolved only if several cells fit inside it, which is why `firstLayerHeight`
+is the single most consequential number in the options.
+
+### Along the wall
+
+Inherited from Phase 1's cosine spacing, which clusters at the leading and
+trailing edges. The wake then starts with the *same* spacing the surface ends
+with, so cells do not jump in size where the wall becomes a cut.
+
+---
+
+## 6. The hard part: marching outwards without folding
+
+Each grid line has to leave the wall along its normal (for orthogonality where
+the boundary layer is) and arrive exactly at its far-field node. How it turns
+between those two decides whether the mesh is usable, and I got it wrong twice.
+
+### The failure
+
+Cells with small negative areas — folded over. First on the forward lower
+surface, later at the trailing edge. A negative area means the cell is
+inside-out, and no finite-volume solver can do anything sensible with one.
+
+### Diagnosis 1: the line doubles back on itself
+
+The first instinct was that adjacent rays were crossing, driven by concave
+surface curvature. The numbers said otherwise: the concave radius on the lower
+surface there is about 0.7 c, but the fold was at 0.037 c — twenty times
+closer.
+
+Printing the layer-to-layer step directions showed the real mechanism. At one
+station the wall normal was −94°, the direction to the far field −160°, but the
+steps between successive layers read −179° then +169°. The *ray itself* was
+doubling back.
+
+For $\mathbf{P}(r) = \mathbf{P}_0 + r\,\mathbf{d}(r)$,
+
+$$\frac{d\mathbf{P}}{dr} = \mathbf{d} + r\,\frac{d\mathbf{d}}{dr}$$
+
+so the line reverses once $r\,|d\theta/dr| > 1$. Two things were making that
+happen:
+
+- **Interpolating the two direction vectors.** A normalised lerp between unit
+  vectors separated by $\Delta$ sweeps at up to $2\tan(\Delta/2)$ per unit of
+  weight, which runs away as $\Delta$ approaches 180°.
+- **Blending over linear $r$.** Because $r \cdot \frac{d}{dr}f(r/L)$ depends
+  only on $r/L$, the product is **scale invariant** — widening the blend zone
+  does not help at all. That was the part I had wrong: my instinct was to give
+  the turn more room, and more room changes nothing.
+
+At the failing station, $\Delta = 65.8°$ gave $0.889 \times 2\tan(32.9°) = 1.15$
+— just over 1, which is why only a narrow band folded, with tiny negative areas.
+
+**The fix**, two changes that make the criterion satisfiable:
+
+1. **Rotate at a constant angular rate** rather than interpolating vectors.
+   Slerp in 2D is just a rotation, so the sweep rate is exactly $\Delta$.
+2. **Blend over $\log r$.** Then $r\,dw/dr = f'/\ln(r_1/r_0)$, which can be made
+   as small as we like by widening the *ratio* of the two radii, not their
+   difference.
+
+Together the condition becomes $\ln(r_1/r_0) > 1.5\,|\Delta|$, and the code
+picks the span as $2.5\,|\Delta|$ for margin. Inside $r_0$ — a few first-layer
+heights, where the boundary layer will sit — the grid is exactly orthogonal.
+
+That took the failures from 5 to 3.
+
+### Diagnosis 2: averaging quietly undid the constraint
+
+The remaining folds sat at the trailing edge and got *worse* with refinement:
+2 cells at Medium, 41 at Fine. The wake cut leaves the trailing edge along the
+chord while the surfaces arrive at a few degrees to it — a concave corner, where
+marching normals converge to a focus a distance $1/\kappa$ away. Cosine spacing
+concentrates points there, so refining shrinks the discrete spacing, raises
+$\kappa$, and pulls the focus closer to the wall.
+
+There *was* a curvature limiter capping the blend length at $0.3/\kappa$. The
+bug was in how I smoothed it: a min-filter followed by eight averaging passes.
+**Averaging can lift a station's value back above the limit its own curvature
+demands.** The limiter was computing the right answer and the smoothing was
+throwing it away.
+
+Replaced with a Lipschitz sweep — one pass forward, one back, allowing the zone
+to thicken only at a bounded rate with distance from a constrained station:
+
+```
+blend[i] = min(blend[i], blend[i±1] + rate * spacing)
+```
+
+That is smooth *and* never exceeds the limit anywhere, which averaging cannot
+promise. Zero inverted cells at every resolution after that.
+
+---
+
+## 7. Validation strategy
+
+The strongest checks are the ones that compare against something independent.
+
+**Finite-volume identities.** For any closed cell the outward area vectors must
+sum to zero:
+
+$$\sum_{\text{faces}} \mathbf{n}\,A = 0$$
+
+This is what makes a constant field have zero discrete divergence, so a solver
+on a mesh that fails it cannot even preserve a uniform flow. Separately, cell
+areas are recovered from their own faces by the divergence theorem applied to
+$\mathbf{F} = (x, y)$, whose divergence is 2:
+
+$$A = \tfrac{1}{2}\sum_{\text{faces}} (\mathbf{c} \cdot \mathbf{n})\,A_{\text{face}}$$
+
+and compared with the shoelace areas — cross-checking centroids, normals and
+face areas against a completely different route to the same number.
+
+**Topology.** Euler's formula $V - E + F = 2$ is a single scalar that catches
+any inconsistency in the node, face and cell counts.
+
+**Agreement with calculus.** The total meshed area is compared against the
+analytic domain area — a rectangle behind the trailing edge plus a half ellipse
+round the front, less the section — and the error is required to *shrink* under
+refinement, since the outer boundary is a polygon inscribed in the true ellipse.
+
+---
+
+## 8. Rendering a mesh you can trust
+
+A fine grid is ~830 × 128 nodes: over 200,000 line segments. Two mechanisms
+keep that usable.
+
+**Culling.** Segments outside the visible world rectangle are skipped and runs
+of visible ones batched into single polylines. This is what makes zooming into
+the leading edge cheap — almost the whole grid is off screen.
+
+**Decimation.** If what survives culling is still over budget, every *n*th grid
+line is drawn.
+
+The second one is a lie about the mesh, so the stride is reported back to the
+panel and displayed: *"Drawing every 4th grid line. Zoom in to see all of
+them."* A thinned-out mesh that looks like the real one would be exactly the
+kind of quietly misleading display this project is trying to avoid.
+
+---
+
+## 9. Status at the end of Phase 2
+
+**Verified by running it**
+
+- Clean configure, build and test; zero warnings including with
+  `-DCFD_WARNINGS_AS_ERRORS=ON`.
+- 134/134 tests pass (133 headless with `-DCFD_BUILD_APP=OFF`).
+- Zero inverted cells at Coarse, Medium and Fine, on 0012, 2412, 4412, 0006
+  and 6409.
+- The rendered domain matches the requested extents: front arc at $x = -12c$,
+  top and bottom at $y = \pm 12c$, outlet at $x = 26$ (trailing edge + 25c),
+  wake cut along $y = 0$.
+- Meshed area 844.9 c² against an analytic 845 c².
+
+**Measured quality**
+
+| | Cells | Wall faces | Max aspect | Max non-orth | Wall step |
+|---|---|---|---|---|---|
+| Coarse | 8,658 | 158 | 6,700 | 77.9° | 1.0×10⁻³ c |
+| Medium | 30,530 | 318 | 14,700 | 74.0° | 3.0×10⁻⁴ c |
+| Fine | 105,410 | 638 | 33,800 | 70.9° | 1.0×10⁻⁴ c |
+
+The aspect ratios are extreme by design — boundary-layer cells are thin normal
+to the wall and long along it. The non-orthogonality is the number I am least
+happy with: ~75° occurs at the trailing edge, where the curvature limiter
+deliberately gives up orthogonality to avoid folding. It is survivable but it
+will cost accuracy in gradient reconstruction there, and is the obvious
+candidate for improvement (elliptic smoothing with control functions) if the
+solver later proves sensitive to it.
+
+**Not verified**
+
+- No flow of any kind. No discretisation of the governing equations, no
+  boundary conditions applied, nothing solved.
+- The wake cut is *represented* correctly but has never been exercised as an
+  interior connection, because nothing crosses it yet.
+- No comparison with another mesh generator or with wind-tunnel data.
+- Still only built and run on macOS 15.7 / arm64 / Apple Clang 17.
+
+## 10. What to understand before Phase 3
+
+1. **The finite-volume statement** in §3 — Phase 3 discretises it. Every term
+   there becomes code.
+2. **Owner/neighbour and the outward normal convention.** Flux assembly loops
+   over faces, adds to the owner and subtracts from the neighbour; the sign
+   convention is what makes that work.
+3. **Non-orthogonality costs accuracy.** A gradient reconstructed across a face
+   is exact only when the face normal is parallel to the line joining the two
+   centroids. Ours reaches 75° at the trailing edge, so the solver will need a
+   non-orthogonal correction.
+4. **Aspect ratio and time steps.** Cells 30,000× longer than they are tall have
+   a very small dimension, and explicit schemes are limited by the smallest one.
+   This is the argument for implicit time stepping, and it is already decided by
+   the mesh.
+5. **Concepts to read up on:** the CFL condition, upwinding and why central
+   differencing on convection goes unstable, and how pressure and velocity are
+   coupled in an incompressible solver.
+
+## 11. What I learned
+
+- **A scale-invariant failure cannot be fixed by changing the scale.** The
+  instinct on a folded grid was to give the turn more room. Working out that
+  $r\,\frac{d}{dr}f(r/L)$ depends only on $r/L$ showed that widening the zone
+  does *nothing*, and pointed straight at changing the blend variable to
+  $\log r$ instead. Doing the derivative rather than guessing saved a long
+  session of tuning constants that could never have worked.
+
+- **Smoothing can silently destroy a constraint.** The curvature limiter was
+  computing the correct bound the whole time; eight averaging passes were
+  throwing it away. When a value means "never exceed this", the only safe
+  smoothing is one that can lower it — a Lipschitz sweep, not an average.
+
+- **Diagnose before fixing.** Both folds looked like the same bug and were not.
+  The first was a ray doubling back; the second was neighbouring rays
+  converging at a corner. The measured fold distance (0.037 c) versus the
+  concave radius (0.7 c) is what ruled out the wrong explanation in seconds.
+
+- **Identities make better tests than tolerances.** $\sum \mathbf{n}A = 0$ and
+  Euler's formula are exact statements about any valid mesh. They caught
+  nothing in the end — the container was right first time — but they are the
+  reason I could be confident the container was right, and could aim all the
+  debugging at the generator.
+
+- **Honesty has a rendering cost.** Decimating the mesh for speed is fine;
+  decimating it silently is not. Reporting the stride was three lines and is the
+  difference between a display you can reason from and one that quietly lies.
+
+**Next:** Phase 3 — the Navier-Stokes discretisation, on explicit instruction.
