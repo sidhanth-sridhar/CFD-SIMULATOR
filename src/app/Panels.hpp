@@ -23,6 +23,8 @@
 #include "cfd/app/Camera2D.hpp"
 #include "cfd/core/Log.hpp"
 #include "cfd/geom/Airfoil.hpp"
+#include "cfd/mesh/CGrid.hpp"
+#include "cfd/mesh/Mesh.hpp"
 
 namespace cfd::app {
 
@@ -45,7 +47,10 @@ struct GeometryState {
 
   int pointsPerSurface{121};
   double chord{1.0};
-  geom::TrailingEdge trailingEdge{geom::TrailingEdge::Open};
+  /// Closed by default, because that is the form the mesher can wrap: a C-grid
+  /// needs the wake cut to start from a single point. The published open form
+  /// stays available for comparison against reference ordinates.
+  geom::TrailingEdge trailingEdge{geom::TrailingEdge::Closed};
 
   // Display toggles.
   bool fillSection{true};
@@ -63,6 +68,46 @@ struct GeometryState {
 
   /// Set whenever an input changes; consumed by updateGeometry().
   bool dirty{true};
+};
+
+/// Mesh inputs, the grid they produced, and how it is drawn.
+struct MeshState {
+  bool enabled{false};
+  bool showInterior{true};
+  bool showBoundaries{true};
+
+  mesh::MeshResolution resolution{mesh::MeshResolution::Medium};
+
+  // Domain extent in chord lengths, independent of the resolution preset.
+  double upstreamChords{12.0};
+  double downstreamChords{25.0};
+  double verticalChords{12.0};
+  /// Seeded from the resolution preset, then editable.
+  double firstLayerHeight{3.0e-4};
+
+  std::optional<mesh::Mesh> mesh;
+  std::string errorMessage;
+  bool dirty{true};
+
+  /// Wall-clock cost of the last successful generation.
+  double lastGenerationMs{0.0};
+  /// Frame the whole domain once the next mesh is ready. Used at startup when
+  /// a mesh was requested on the command line, where showing the section alone
+  /// would hide what was asked for.
+  bool pendingDomainFit{false};
+  /// Set by the renderer: 1 when every grid line is drawn, higher when the
+  /// view is decimated for speed. Reported in the panel so a thinned-out mesh
+  /// is never mistaken for the real one.
+  int drawStride{1};
+
+  [[nodiscard]] mesh::CGridOptions options() const {
+    mesh::CGridOptions o = mesh::optionsFor(resolution);
+    o.upstreamChords = upstreamChords;
+    o.downstreamChords = downstreamChords;
+    o.verticalChords = verticalChords;
+    o.firstLayerHeight = firstLayerHeight;
+    return o;
+  }
 };
 
 /// Everything the UI reads or mutates during a frame.
@@ -109,6 +154,7 @@ struct UiState {
   float lastFrameCpuMs{0.0f};
 
   GeometryState geometry;
+  MeshState meshing;
 
   theme::Fonts fonts;
   RendererInfo renderer;
@@ -120,8 +166,15 @@ struct UiState {
 /// results from different inputs.
 void updateGeometry(UiState& ui);
 
+/// Regenerate the mesh if the geometry or any meshing input changed. Must run
+/// after updateGeometry, since the grid is built around the current section.
+void updateMesh(UiState& ui);
+
 /// Restore the default view: origin centred, unit chord comfortably framed.
 void resetView(UiState& ui);
+
+/// Frame the whole computational domain. Does nothing without a mesh.
+void fitDomain(UiState& ui);
 
 /// Restore default panel sizes and visibility.
 void resetLayout(UiState& ui);
@@ -131,6 +184,7 @@ void resetLayout(UiState& ui);
 void drawMenuBar(UiState& ui);
 void drawToolbar(UiState& ui);
 void drawGeometryPanel(UiState& ui);
+void drawMeshPanel(UiState& ui);
 void drawSessionPanel(UiState& ui);
 void drawViewport(UiState& ui);
 void drawConsole(UiState& ui);

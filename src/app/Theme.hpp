@@ -64,6 +64,17 @@ inline const ImVec4 kChordLine{0.478f, 0.514f, 0.549f, 0.75f};    // grey, dashe
 inline const ImVec4 kSurfacePoint{0.596f, 0.729f, 0.831f, 1.00f};
 inline const ImVec4 kMarker{0.796f, 0.451f, 0.427f, 1.00f};       // leading/trailing edge
 
+// Mesh. Interior lines are near the limit of visibility on purpose: at these
+// cell counts they are texture, not content, and must not bury the section or
+// the flow field that will eventually be drawn on top of them.
+inline const ImVec4 kMeshLine{0.278f, 0.325f, 0.373f, 0.55f};
+// Boundaries are drawn over the interior, one colour per condition, so the
+// domain's structure can be read at a glance.
+inline const ImVec4 kBoundaryWall{0.847f, 0.847f, 0.878f, 1.00f};
+inline const ImVec4 kBoundaryFarfield{0.427f, 0.588f, 0.749f, 1.00f};
+inline const ImVec4 kBoundaryOutlet{0.475f, 0.702f, 0.573f, 1.00f};
+inline const ImVec4 kBoundaryWakeCut{0.831f, 0.651f, 0.400f, 1.00f};
+
 /// Fixed metrics, in unscaled pixels. DPI scaling is applied by ImGui.
 inline constexpr float kToolbarHeight = 30.0f;
 inline constexpr float kStatusBarHeight = 24.0f;

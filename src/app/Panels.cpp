@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cfloat>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -251,6 +252,153 @@ void addDashedPolyline(ImDrawList* draw, const std::vector<ImVec2>& points, ImU3
   }
 }
 
+/// Roughly how many line segments we are willing to submit for the mesh in one
+/// frame. Above this the view is decimated; the panel says so.
+constexpr int kMeshSegmentBudget = 60000;
+
+/// Draw the grid.
+///
+/// Two costs have to be kept under control. A fine grid is ~830 x 128 nodes,
+/// which is over 200,000 line segments - more than is either fast to submit or
+/// meaningful to look at when the whole 25-chord domain is on screen.
+///
+///   * Culling. Segments outside the visible world rectangle are skipped, and
+///     runs of consecutive visible ones are batched into a single polyline.
+///     This is what makes zooming into the leading edge cheap: almost the
+///     entire grid is off screen.
+///   * Decimation. If what survives culling is still over budget, every n-th
+///     grid line is drawn. That is a lie about the mesh, so the stride is
+///     reported back and shown in the panel rather than hidden.
+void drawMeshLines(ImDrawList* draw, UiState& ui, ImVec2 origin) {
+  const mesh::Mesh& grid = *ui.meshing.mesh;
+  if (!grid.isStructured()) {
+    return;
+  }
+  const int ni = grid.nodesI();
+  const int nj = grid.nodesJ();
+  const std::vector<Vec2>& nodes = grid.nodes();
+
+  const auto [worldMin, worldMax] = ui.camera.visibleBounds();
+  const auto segmentVisible = [&](const Vec2& a, const Vec2& b) {
+    return !(std::max(a.x, b.x) < worldMin.x || std::min(a.x, b.x) > worldMax.x ||
+             std::max(a.y, b.y) < worldMin.y || std::min(a.y, b.y) > worldMax.y);
+  };
+  const auto toScreen = [&](const Vec2& world) {
+    const Vec2 s = ui.camera.worldToScreen(world);
+    return ImVec2(static_cast<float>(static_cast<double>(origin.x) + s.x),
+                  static_cast<float>(static_cast<double>(origin.y) + s.y));
+  };
+  const auto nodeAt = [&](int i, int j) -> const Vec2& {
+    return nodes[static_cast<std::size_t>(j) * static_cast<std::size_t>(ni) +
+                 static_cast<std::size_t>(i)];
+  };
+
+  // First pass: how much of the grid actually lands on screen?
+  long long visible = 0;
+  for (int j = 0; j < nj; ++j) {
+    for (int i = 0; i + 1 < ni; ++i) {
+      if (segmentVisible(nodeAt(i, j), nodeAt(i + 1, j))) {
+        ++visible;
+      }
+    }
+  }
+  for (int i = 0; i < ni; ++i) {
+    for (int j = 0; j + 1 < nj; ++j) {
+      if (segmentVisible(nodeAt(i, j), nodeAt(i, j + 1))) {
+        ++visible;
+      }
+    }
+  }
+
+  const int stride =
+      (visible > kMeshSegmentBudget)
+          ? static_cast<int>((visible + kMeshSegmentBudget - 1) / kMeshSegmentBudget)
+          : 1;
+  ui.meshing.drawStride = stride;
+
+  const ImU32 colour = ImGui::GetColorU32(theme::kMeshLine);
+  std::vector<ImVec2> run;
+  run.reserve(static_cast<std::size_t>(std::max(ni, nj)));
+
+  const auto flush = [&]() {
+    if (run.size() >= 2) {
+      draw->AddPolyline(run.data(), static_cast<int>(run.size()), colour, 1.0f, 0);
+    }
+    run.clear();
+  };
+
+  // Lines of constant j, running along the surface and out into the wake.
+  for (int j = 0; j < nj; j += stride) {
+    for (int i = 0; i + 1 < ni; ++i) {
+      const Vec2& a = nodeAt(i, j);
+      const Vec2& b = nodeAt(i + 1, j);
+      if (!segmentVisible(a, b)) {
+        flush();
+        continue;
+      }
+      if (run.empty()) {
+        run.push_back(toScreen(a));
+      }
+      run.push_back(toScreen(b));
+    }
+    flush();
+  }
+
+  // Lines of constant i, running from the wall out to the far field.
+  for (int i = 0; i < ni; i += stride) {
+    for (int j = 0; j + 1 < nj; ++j) {
+      const Vec2& a = nodeAt(i, j);
+      const Vec2& b = nodeAt(i, j + 1);
+      if (!segmentVisible(a, b)) {
+        flush();
+        continue;
+      }
+      if (run.empty()) {
+        run.push_back(toScreen(a));
+      }
+      run.push_back(toScreen(b));
+    }
+    flush();
+  }
+}
+
+/// Draw boundary faces coloured by the condition they will carry.
+void drawMeshBoundaries(ImDrawList* draw, const UiState& ui, ImVec2 origin) {
+  const mesh::Mesh& grid = *ui.meshing.mesh;
+
+  const auto toScreen = [&](const Vec2& world) {
+    const Vec2 s = ui.camera.worldToScreen(world);
+    return ImVec2(static_cast<float>(static_cast<double>(origin.x) + s.x),
+                  static_cast<float>(static_cast<double>(origin.y) + s.y));
+  };
+
+  const auto [worldMin, worldMax] = ui.camera.visibleBounds();
+
+  for (std::size_t f = 0; f < grid.faceCount(); ++f) {
+    const mesh::Face& face = grid.faces()[f];
+    if (face.isInterior()) {
+      continue;
+    }
+
+    const Vec2& a = grid.nodes()[static_cast<std::size_t>(face.nodes[0])];
+    const Vec2& b = grid.nodes()[static_cast<std::size_t>(face.nodes[1])];
+    if (std::max(a.x, b.x) < worldMin.x || std::min(a.x, b.x) > worldMax.x ||
+        std::max(a.y, b.y) < worldMin.y || std::min(a.y, b.y) > worldMax.y) {
+      continue;
+    }
+
+    const ImVec4* colour = &theme::kBoundaryWall;
+    switch (face.boundary) {
+      case mesh::BoundaryType::Wall:     colour = &theme::kBoundaryWall; break;
+      case mesh::BoundaryType::Farfield: colour = &theme::kBoundaryFarfield; break;
+      case mesh::BoundaryType::Outlet:   colour = &theme::kBoundaryOutlet; break;
+      case mesh::BoundaryType::WakeCut:  colour = &theme::kBoundaryWakeCut; break;
+      case mesh::BoundaryType::Interior: continue;
+    }
+    draw->AddLine(toScreen(a), toScreen(b), ImGui::GetColorU32(*colour), 1.6f);
+  }
+}
+
 /// Draw the generated section: fill, outline, construction lines and markers.
 void drawAirfoil(ImDrawList* draw, const UiState& ui, ImVec2 origin) {
   if (!ui.geometry.airfoil.has_value()) {
@@ -436,6 +584,69 @@ void updateGeometry(UiState& ui) {
   if (isFirst && ui.viewInitialized) {
     resetView(ui);
   }
+
+  // The grid is built around the section, so a new section invalidates it.
+  ui.meshing.dirty = true;
+}
+
+void fitDomain(UiState& ui) {
+  if (!ui.meshing.mesh.has_value()) {
+    return;
+  }
+  const std::vector<Vec2>& nodes = ui.meshing.mesh->nodes();
+  if (nodes.empty()) {
+    return;
+  }
+
+  Vec2 minimum = nodes.front();
+  Vec2 maximum = nodes.front();
+  for (const Vec2& node : nodes) {
+    minimum.x = std::min(minimum.x, node.x);
+    minimum.y = std::min(minimum.y, node.y);
+    maximum.x = std::max(maximum.x, node.x);
+    maximum.y = std::max(maximum.y, node.y);
+  }
+  ui.camera.frameBox(minimum, maximum, 0.04);
+}
+
+void updateMesh(UiState& ui) {
+  MeshState& state = ui.meshing;
+  if (!state.dirty) {
+    return;
+  }
+  state.dirty = false;
+
+  if (!state.enabled || !ui.geometry.airfoil.has_value()) {
+    state.mesh.reset();
+    state.errorMessage.clear();
+    return;
+  }
+
+  const auto started = std::chrono::steady_clock::now();
+  Result<mesh::Mesh> generated =
+      mesh::generateCGrid(*ui.geometry.airfoil, state.options());
+  const std::chrono::duration<double, std::milli> elapsed =
+      std::chrono::steady_clock::now() - started;
+
+  if (!generated) {
+    // Drop the stale grid: unlike the section, a mesh that no longer matches
+    // its inputs would be actively misleading to leave on screen.
+    state.mesh.reset();
+    state.errorMessage = generated.error().message();
+    return;
+  }
+
+  state.errorMessage.clear();
+  state.lastGenerationMs = elapsed.count();
+  state.mesh = std::move(generated).value();
+
+  const mesh::MeshQuality& quality = state.mesh->quality();
+  CFD_LOG_INFO(kLogCategory,
+               "{} C-grid: {} cells, {} faces, {} inverted, aspect {:.0f}, "
+               "non-orthogonality {:.1f} deg, {:.1f} ms",
+               toString(state.resolution), state.mesh->cellCount(),
+               state.mesh->faceCount(), quality.invertedCells, quality.maxAspectRatio,
+               quality.maxNonOrthogonalityDeg, state.lastGenerationMs);
 }
 
 void resetLayout(UiState& ui) {
@@ -640,6 +851,166 @@ void drawGeometryPanel(UiState& ui) {
   }
 }
 
+void drawMeshPanel(UiState& ui) {
+  MeshState& state = ui.meshing;
+
+  if (!ImGui::CollapsingHeader("Mesh", ImGuiTreeNodeFlags_DefaultOpen)) {
+    return;
+  }
+
+  if (ImGui::Checkbox("Generate mesh", &state.enabled)) {
+    state.dirty = true;
+  }
+
+  if (!state.enabled) {
+    ImGui::TextColored(theme::kTextDisabled, "No computational domain.");
+    return;
+  }
+
+  // --- resolution ---
+  if (beginInfoTable("mesh_inputs", 104.0f)) {
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::TextColored(theme::kTextDim, "Resolution");
+    ImGui::TableSetColumnIndex(1);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::BeginCombo("##resolution",
+                          std::string{toString(state.resolution)}.c_str())) {
+      for (const mesh::MeshResolution level :
+           {mesh::MeshResolution::Coarse, mesh::MeshResolution::Medium,
+            mesh::MeshResolution::Fine}) {
+        const bool selected = (state.resolution == level);
+        if (ImGui::Selectable(std::string{toString(level)}.c_str(), selected)) {
+          state.resolution = level;
+          // The preset owns the near-wall spacing; adopt it so switching
+          // levels actually changes the boundary-layer resolution.
+          state.firstLayerHeight = mesh::optionsFor(level).firstLayerHeight;
+          state.dirty = true;
+        }
+        if (selected) {
+          ImGui::SetItemDefaultFocus();
+        }
+      }
+      ImGui::EndCombo();
+    }
+
+    const auto extentRow = [&](const char* label, const char* id, double* value,
+                               double low, double high) {
+      ImGui::TableNextRow();
+      ImGui::TableSetColumnIndex(0);
+      ImGui::TextColored(theme::kTextDim, "%s", label);
+      ImGui::TableSetColumnIndex(1);
+      ImGui::SetNextItemWidth(-FLT_MIN);
+      if (ImGui::DragScalar(id, ImGuiDataType_Double, value, 0.1f, nullptr, nullptr,
+                            "%.1f c")) {
+        *value = std::clamp(*value, low, high);
+        state.dirty = true;
+      }
+    };
+    extentRow("Upstream", "##upstream", &state.upstreamChords, 1.0, 60.0);
+    extentRow("Downstream", "##downstream", &state.downstreamChords, 1.0, 100.0);
+    extentRow("Vertical", "##vertical", &state.verticalChords, 1.0, 60.0);
+
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::TextColored(theme::kTextDim, "First layer");
+    ImGui::TableSetColumnIndex(1);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::DragScalar("##firstlayer", ImGuiDataType_Double, &state.firstLayerHeight,
+                          1e-5f, nullptr, nullptr, "%.1e c")) {
+      state.firstLayerHeight = std::clamp(state.firstLayerHeight, 1e-6, 0.1);
+      state.dirty = true;
+    }
+    ImGui::EndTable();
+  }
+
+  ImGui::Spacing();
+  ImGui::SeparatorText("Display");
+  ImGui::Checkbox("Grid", &state.showInterior);
+  ImGui::SameLine();
+  ImGui::Checkbox("Boundaries", &state.showBoundaries);
+  if (ImGui::Button("Fit domain", ImVec2(-FLT_MIN, 0.0f))) {
+    fitDomain(ui);
+  }
+
+  if (!state.errorMessage.empty()) {
+    ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::kLevelError);
+    ImGui::TextWrapped("%s", state.errorMessage.c_str());
+    ImGui::PopStyleColor();
+    return;
+  }
+  if (!state.mesh.has_value()) {
+    return;
+  }
+
+  // --- statistics ---
+  const mesh::Mesh& grid = *state.mesh;
+  const mesh::MeshQuality& quality = grid.quality();
+
+  ImGui::Spacing();
+  ImGui::SeparatorText("Domain");
+  if (beginInfoTable("mesh_stats", 104.0f)) {
+    infoRow(ui, "Block", std::format("{} x {} nodes", grid.nodesI(), grid.nodesJ()));
+    infoRow(ui, "Cells", std::format("{}", grid.cellCount()));
+    infoRow(ui, "Faces", std::format("{}", grid.faceCount()));
+    infoRow(ui, "Area", std::format("{:.4g} c²", grid.totalArea()));
+    infoRow(ui, "Built in", std::format("{:.1f} ms", state.lastGenerationMs));
+    ImGui::EndTable();
+  }
+
+  ImGui::Spacing();
+  ImGui::SeparatorText("Boundaries");
+  if (beginInfoTable("mesh_boundaries", 104.0f)) {
+    const auto boundaryRow = [&](const char* label, mesh::BoundaryType type,
+                                 const ImVec4& swatch) {
+      ImGui::TableNextRow();
+      ImGui::TableSetColumnIndex(0);
+      ImGui::TextColored(swatch, "%s", label);
+      ImGui::TableSetColumnIndex(1);
+      if (ui.fonts.mono != nullptr) {
+        ImGui::PushFont(ui.fonts.mono, 0.0f);
+      }
+      ImGui::Text("%zu faces", grid.countFaces(type));
+      if (ui.fonts.mono != nullptr) {
+        ImGui::PopFont();
+      }
+    };
+    boundaryRow("Wall", mesh::BoundaryType::Wall, theme::kBoundaryWall);
+    boundaryRow("Wake cut", mesh::BoundaryType::WakeCut, theme::kBoundaryWakeCut);
+    boundaryRow("Far field", mesh::BoundaryType::Farfield, theme::kBoundaryFarfield);
+    boundaryRow("Outlet", mesh::BoundaryType::Outlet, theme::kBoundaryOutlet);
+    ImGui::EndTable();
+  }
+
+  ImGui::Spacing();
+  ImGui::SeparatorText("Quality");
+  if (beginInfoTable("mesh_quality", 104.0f)) {
+    infoRow(ui, "Cell area", std::format("{:.2e} to {:.2e}", quality.minCellArea,
+                                         quality.maxCellArea));
+    infoRow(ui, "Wall step", std::format("{:.2e} c", quality.minWallSpacing));
+    infoRow(ui, "Max aspect", std::format("{:.0f}", quality.maxAspectRatio));
+    infoRow(ui, "Max non-orth", std::format("{:.1f} deg", quality.maxNonOrthogonalityDeg));
+    ImGui::EndTable();
+  }
+
+  // Inverted cells would make the mesh unusable, so they get stated plainly
+  // either way rather than only when something is wrong.
+  if (quality.invertedCells > 0) {
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::kLevelError);
+    ImGui::Text("%zu inverted cells", quality.invertedCells);
+    ImGui::PopStyleColor();
+  } else {
+    ImGui::TextColored(theme::kTextDim, "No inverted cells.");
+  }
+
+  if (state.drawStride > 1) {
+    ImGui::TextColored(theme::kLevelWarning, "Drawing every %d%s grid line.",
+                       state.drawStride, state.drawStride == 2 ? "nd" : "th");
+    ImGui::TextColored(theme::kTextDisabled, "Zoom in to see all of them.");
+  }
+}
+
 void drawSessionPanel(UiState& ui) {
   if (ImGui::CollapsingHeader("Build", ImGuiTreeNodeFlags_DefaultOpen)) {
     if (beginInfoTable("build_info")) {
@@ -691,7 +1062,7 @@ void drawSessionPanel(UiState& ui) {
     };
     static constexpr std::array<Stage, 8> kStages{{
         {"Geometry (NACA)", true},
-        {"Mesh generation", false},
+        {"Mesh generation", true},
         {"Navier-Stokes", false},
         {"RANS averaging", false},
         {"k-omega SST", false},
@@ -744,6 +1115,11 @@ void drawViewport(UiState& ui) {
     resetView(ui);
     ui.viewInitialized = true;
   }
+  // Deferred until the viewport has a real size, since framing depends on it.
+  if (ui.meshing.pendingDomainFit && ui.meshing.mesh.has_value()) {
+    fitDomain(ui);
+    ui.meshing.pendingDomainFit = false;
+  }
 
   // An InvisibleButton the size of the canvas gives us hover and drag state
   // without drawing anything, and lets ImGui arbitrate input so a drag that
@@ -795,6 +1171,18 @@ void drawViewport(UiState& ui) {
   draw->AddRectFilled(origin, far_corner, ImGui::GetColorU32(theme::kViewport));
 
   drawGridAndAxes(draw, ui, origin, size);
+
+  // Mesh first, section on top: the wall faces coincide with the outline, and
+  // the section should win that overlap.
+  if (ui.meshing.mesh.has_value()) {
+    if (ui.meshing.showInterior) {
+      drawMeshLines(draw, ui, origin);
+    }
+    if (ui.meshing.showBoundaries) {
+      drawMeshBoundaries(draw, ui, origin);
+    }
+  }
+
   drawAirfoil(draw, ui, origin);
 
   // Empty-state notice, shown only when there is genuinely nothing to draw.

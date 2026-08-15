@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <fstream>
@@ -286,6 +287,7 @@ void Application::Impl::layoutAndDrawPanels() {
 
     if (beginPanel("##session", ImVec2(regionX, regionY), ImVec2(leftWidth, regionH))) {
       drawGeometryPanel(ui);
+      drawMeshPanel(ui);
       drawSessionPanel(ui);
     }
     ImGui::End();
@@ -339,6 +341,8 @@ void Application::Impl::drawFrame() {
   // Regenerate before anything is drawn, so the viewport and the measured
   // readout in the panel can never disagree within a frame.
   updateGeometry(ui);
+  // Strictly after the geometry: the grid is built around the current section.
+  updateMesh(ui);
 
   // Drain any trackpad pinch once per frame; the viewport applies and clears it.
   ui.pinchMagnification += platform::consumePinchMagnification();
@@ -390,6 +394,27 @@ Status Application::initialize(const ApplicationOptions& options) {
     buffer[copied] = '\0';
     impl_->ui.geometry.dirty = true;
   }
+  if (!options.initialMeshResolution.empty()) {
+    std::string level = options.initialMeshResolution;
+    std::transform(level.begin(), level.end(), level.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    if (level == "coarse") {
+      impl_->ui.meshing.resolution = mesh::MeshResolution::Coarse;
+    } else if (level == "fine") {
+      impl_->ui.meshing.resolution = mesh::MeshResolution::Fine;
+    } else {
+      impl_->ui.meshing.resolution = mesh::MeshResolution::Medium;
+    }
+    impl_->ui.meshing.firstLayerHeight =
+        mesh::optionsFor(impl_->ui.meshing.resolution).firstLayerHeight;
+    impl_->ui.meshing.enabled = true;
+    impl_->ui.meshing.dirty = true;
+    // A mesh asked for on the command line is the thing to look at, so open
+    // on the whole domain rather than on the section.
+    impl_->ui.meshing.pendingDomainFit = true;
+  }
+
   impl_->screenshotPath = options.screenshotPath;
   impl_->screenshotAfterFrames = std::max(options.screenshotAfterFrames, 1);
 

@@ -43,6 +43,10 @@ struct ApplicationOptions {
   /// establishes layout and font atlases that later frames depend on.
   int screenshotAfterFrames{3};
 
+  /// Generate the computational mesh at startup, at the named resolution:
+  /// "coarse", "medium" or "fine". Empty leaves meshing switched off.
+  std::string initialMeshResolution{};
+
   /// Section to load at startup, e.g. "NACA 2412". Empty keeps the default.
   /// The string is placed in the geometry panel's input, so it is validated
   /// and reported through the same path as anything typed by hand.

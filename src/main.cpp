@@ -33,6 +33,7 @@ struct Options {
   bool selfCheck{false};
   std::string screenshotPath;
   std::string section;
+  std::string meshResolution;
 };
 
 void printUsage() {
@@ -48,6 +49,8 @@ void printUsage() {
       "                          (default: info)\n"
       "      --section NAME      Load a NACA four-digit section at startup,\n"
       "                          e.g. --section \"NACA 2412\"\n"
+      "      --mesh LEVEL        Generate the mesh at startup:\n"
+      "                          coarse, medium or fine\n"
       "      --self-check        Run headless startup checks and exit\n"
       "      --screenshot FILE   Render a few frames, save the window to FILE\n"
       "                          as a BMP, then exit\n"
@@ -76,6 +79,13 @@ cfd::Result<Options> parseArguments(std::span<const std::string_view> args) {
       }
       ++i;
       options.section = std::string{args[i]};
+    } else if (arg == "--mesh") {
+      if (i + 1 >= args.size()) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          "--mesh requires a level: coarse, medium or fine"};
+      }
+      ++i;
+      options.meshResolution = std::string{args[i]};
     } else if (arg == "--screenshot") {
       if (i + 1 >= args.size()) {
         return cfd::Error{cfd::ErrorCode::InvalidArgument,
@@ -195,6 +205,7 @@ int main(int argc, char** argv) {
     appOptions.logBuffer = guiLog;
     appOptions.screenshotPath = options.screenshotPath;
     appOptions.initialSection = options.section;
+    appOptions.initialMeshResolution = options.meshResolution;
 
     cfd::app::Application application;
     if (const cfd::Status status = application.initialize(appOptions); !status) {
