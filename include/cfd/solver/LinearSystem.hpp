@@ -62,10 +62,22 @@ class LinearSystem {
   /// stream, where round-off would then be divided by nothing.
   [[nodiscard]] double diagonalL1() const;
 
-  /// True if every face has upper == lower, i.e. the matrix is symmetric and
-  /// conjugate gradient is applicable.
-  [[nodiscard]] bool isSymmetric(double tolerance = 1e-12) const;
+  /// True if every interior face has upper == lower.
+  ///
+  /// Wake-cut faces are skipped: the two sides of a cut are separate faces, so
+  /// each carries only its own row's coefficient and the pair is symmetric
+  /// between them rather than within either one.
+  [[nodiscard]] bool isSymmetric(const mesh::Mesh& mesh, double tolerance = 1e-12) const;
 };
+
+/// The cell on the far side of a face, or -1 if there is none.
+///
+/// For an ordinary interior face that is simply the neighbour. For a wake cut
+/// it is the owner of the partner face: the two coincide in space, so they
+/// behave as one interior connection even though the mesh stores them as two
+/// boundary faces. Every part of the discretisation has to agree about this,
+/// which is why it lives in one place.
+[[nodiscard]] int oppositeCell(const mesh::Mesh& mesh, std::size_t face) noexcept;
 
 /// Gauss-Seidel sweeps, in place.
 ///

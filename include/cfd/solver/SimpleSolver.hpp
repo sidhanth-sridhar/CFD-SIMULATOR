@@ -84,10 +84,17 @@ enum class ConvectionScheme {
 struct SimpleSettings {
   /// Fraction of each momentum update kept. Applied implicitly, by inflating
   /// the diagonal, which is more stable than scaling the update afterwards.
-  double velocityRelaxation{0.7};
+  ///
+  /// The textbook pair is 0.7 with 0.3 below, and that is what the Cartesian
+  /// validation cases run at happily. The defaults here are deliberately more
+  /// cautious: on the aerofoil C-grid, where non-orthogonality reaches 75
+  /// degrees and cells near the wake are thousands of times longer than they
+  /// are thick, 0.7 diverges within a hundred iterations. Converging slowly is
+  /// recoverable; diverging is not.
+  double velocityRelaxation{0.5};
   /// Fraction of the pressure correction kept. Lower than the velocity value
   /// because the correction is the quantity SIMPLE approximates most crudely.
-  double pressureRelaxation{0.3};
+  double pressureRelaxation{0.2};
 
   /// Gauss-Seidel sweeps per momentum equation. Solving these tightly is
   /// wasted work: the pressure is about to change anyway.
@@ -103,6 +110,14 @@ struct SimpleSettings {
   /// non-orthogonal part of the flux. Needed on skewed meshes; the C-grid
   /// reaches 75 degrees of non-orthogonality at the trailing edge.
   int nonOrthogonalCorrectors{1};
+
+  /// How much of the non-orthogonal diffusion correction to apply, 0 to 1.
+  ///
+  /// The correction is explicit - it uses the previous iteration's gradient -
+  /// so on a badly skewed mesh it can feed back on itself and diverge. Damping
+  /// it trades a little accuracy on skewed cells for the ability to converge at
+  /// all. 1 is correct where the mesh allows it.
+  double nonOrthogonalBlend{1.0};
 };
 
 /// What one outer iteration achieved.

@@ -87,9 +87,23 @@ void SimpleSolver::precomputeGeometry() {
     g.area = mesh.faceNormals()[f] * mesh.faceAreas()[f];
 
     const Vec2& ownerCentroid = mesh.cellCentroids()[static_cast<std::size_t>(face.owner)];
+    const int across = oppositeCell(mesh, f);
     if (face.neighbour >= 0) {
       g.delta = mesh.cellCentroids()[static_cast<std::size_t>(face.neighbour)] - ownerCentroid;
       g.ownerWeight = ownerWeight(mesh, f);
+    } else if (across >= 0) {
+      // Wake cut. The cell on the far side of the slit is a real neighbour in
+      // every respect except that the mesh stores the connection as two
+      // coincident faces, so the spacing that matters is centroid to centroid
+      // straight through the cut.
+      const Vec2& acrossCentroid = mesh.cellCentroids()[static_cast<std::size_t>(across)];
+      g.delta = acrossCentroid - ownerCentroid;
+      const double toOwner = distance(mesh.faceCentres()[f], ownerCentroid);
+      const double toAcross = distance(mesh.faceCentres()[f], acrossCentroid);
+      const double span = toOwner + toAcross;
+      // Weighted so the partner face computes the identical value, which is
+      // what keeps the pressure matrix symmetric across the pair.
+      g.ownerWeight = (span > 0.0) ? toAcross / span : 0.5;
     } else {
       // For a boundary face the "neighbour" is the face itself.
       g.delta = mesh.faceCentres()[f] - ownerCentroid;
@@ -266,7 +280,8 @@ void SimpleSolver::assembleMomentum(int index) {
       // gradient. Explicit because making it implicit would fill the matrix
       // with entries beyond the immediate neighbours.
       const Vec2 faceGradient = gradient[owner] * w + gradient[neighbour] * (1.0 - w);
-      const double correction = viscosity * dot(faceGradient, g.tangential);
+      const double correction =
+          settings_.nonOrthogonalBlend * viscosity * dot(faceGradient, g.tangential);
       momentum_.source[owner] += correction;
       momentum_.source[neighbour] -= correction;
 
@@ -287,20 +302,23 @@ void SimpleSolver::assembleMomentum(int index) {
     }
 
     if (other >= 0) {
-      // Wake cut: interior physics, but the two sides are separate faces so
-      // only the owner's row is touched here. The partner face contributes the
-      // matching term to the cell on the other side when it is visited.
+      // Wake cut: interior physics. Only the owner's row is touched here; the
+      // partner face contributes the matching term to the cell on the other
+      // side when it is visited.
       const auto neighbour = static_cast<std::size_t>(other);
-      const double viscosity = field_.viscosity[owner];
+      const double w = g.ownerWeight;
+      const double viscosity =
+          w * field_.viscosity[owner] + (1.0 - w) * field_.viscosity[neighbour];
       const double diffusion = viscosity * g.diffusion;
       const double outward = std::max(flux, 0.0);
       const double inward = std::max(-flux, 0.0);
 
       momentum_.diagonal[owner] += outward + diffusion;
-      // The neighbour is not a face neighbour in the matrix, so its influence
-      // has to be explicit.
+      momentum_.upper[f] += -inward - diffusion;
+
+      const Vec2 faceGradient = gradient[owner] * w + gradient[neighbour] * (1.0 - w);
       momentum_.source[owner] +=
-          (inward + diffusion) * component(field_.velocity[neighbour], index);
+          settings_.nonOrthogonalBlend * viscosity * dot(faceGradient, g.tangential);
       continue;
     }
 
@@ -314,7 +332,8 @@ void SimpleSolver::assembleMomentum(int index) {
       momentum_.source[owner] -= flux * imposed;
       momentum_.diagonal[owner] += diffusion;
       momentum_.source[owner] += diffusion * imposed;
-      momentum_.source[owner] += viscosity * dot(gradient[owner], g.tangential);
+      momentum_.source[owner] +=
+          settings_.nonOrthogonalBlend * viscosity * dot(gradient[owner], g.tangential);
     } else {
       // Zero-gradient: the face value is the cell value, so convection is
       // implicit and there is no diffusive flux.
@@ -436,8 +455,22 @@ void SimpleSolver::assemblePressureCorrection() {
       continue;
     }
 
-    if (face.boundary == mesh::BoundaryType::WakeCut) {
-      continue;  // handled by the partner face's own row
+    const int across = oppositeCell(mesh, f);
+    if (across >= 0) {
+      // Wake cut: couple to the cell across the slit. Without this the flux
+      // through the cut could never be corrected, and continuity would be
+      // unenforceable there - which diverges.
+      const auto neighbour = static_cast<std::size_t>(across);
+      const double w = g.ownerWeight;
+      const double density =
+          w * field_.density[owner] + (1.0 - w) * field_.density[neighbour];
+      const double mobility = w * (mesh.cellAreas()[owner] / momentumDiagonal_[owner]) +
+                              (1.0 - w) * (mesh.cellAreas()[neighbour] /
+                                           momentumDiagonal_[neighbour]);
+      const double coefficient = density * mobility * g.diffusion;
+      pressure_.diagonal[owner] += coefficient;
+      pressure_.upper[f] += -coefficient;
+      continue;
     }
     if (imposesVelocity(f)) {
       continue;  // the flux is fixed, so no correction is possible here
@@ -529,7 +562,20 @@ void SimpleSolver::correct(const std::vector<double>& pressureCorrection) {
                       (pressureCorrection[neighbour] - pressureCorrection[owner]);
       continue;
     }
-    if (face.boundary == mesh::BoundaryType::WakeCut || imposesVelocity(f)) {
+    const int across = oppositeCell(mesh, f);
+    if (across >= 0) {
+      const auto neighbour = static_cast<std::size_t>(across);
+      const double w = g.ownerWeight;
+      const double density =
+          w * field_.density[owner] + (1.0 - w) * field_.density[neighbour];
+      const double mobility = w * (mesh.cellAreas()[owner] / momentumDiagonal_[owner]) +
+                              (1.0 - w) * (mesh.cellAreas()[neighbour] /
+                                           momentumDiagonal_[neighbour]);
+      massFlux_[f] -= density * mobility * g.diffusion *
+                      (pressureCorrection[neighbour] - pressureCorrection[owner]);
+      continue;
+    }
+    if (imposesVelocity(f)) {
       continue;
     }
     const double density = field_.density[owner];

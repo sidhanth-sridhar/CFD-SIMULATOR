@@ -22,7 +22,9 @@
 #include <cmath>
 #include <vector>
 
+#include "cfd/geom/Airfoil.hpp"
 #include "cfd/mesh/BoxGrid.hpp"
+#include "cfd/mesh/CGrid.hpp"
 #include "cfd/solver/SimpleSolver.hpp"
 
 namespace {
@@ -413,6 +415,68 @@ TEST(Validation, ResidualsFallMonotonicallyAndMassIsConserved) {
     }
   }
   EXPECT_LT(std::abs(net), 1e-10);
+}
+
+// ---------------------------------------------------------------------------
+// The aerofoil C-grid
+// ---------------------------------------------------------------------------
+
+// The C-grid is far harder than any box: 75 degrees of non-orthogonality at
+// the trailing edge, cells thousands of times longer than they are thick, and
+// a wake cut that has to behave as an interior connection. Getting this stable
+// forced two real fixes - coupling the wake cut through the pressure equation,
+// and stopping the far-field wake boundary from inheriting the trailing edge's
+// 1e-4 chord clustering - so it is worth guarding against regression.
+TEST(Validation, AerofoilCGridStaysStableAndReducesResiduals) {
+  auto section = cfd::geom::makeNaca4Digit(
+      "0012", {.chord = 1.0, .trailingEdge = cfd::geom::TrailingEdge::Closed});
+  ASSERT_TRUE(section);
+
+  auto grid = cfd::mesh::generateCGrid(section.value(),
+                                       cfd::mesh::optionsFor(cfd::mesh::MeshResolution::Coarse));
+  ASSERT_TRUE(grid) << (grid.hasError() ? grid.error().format() : "");
+  const Mesh& mesh = grid.value();
+
+  cfd::flow::FreestreamConditions stream;
+  stream.speed = 1.0;
+  stream.density = 1.0;
+  stream.reynoldsNumber = 500.0;  // low enough to be genuinely laminar
+
+  auto conditions =
+      cfd::flow::buildFaceConditions(mesh, cfd::flow::BoundaryConditions{}, stream);
+  ASSERT_TRUE(conditions);
+
+  auto created = SimpleSolver::create(mesh, conditions.value(), SimpleSettings{});
+  ASSERT_TRUE(created);
+  SimpleSolver& solver = created.value();
+
+  auto initial = FlowField::uniform(mesh.cellCount(), stream, 1.0);
+  ASSERT_TRUE(initial);
+  ASSERT_TRUE(solver.initialise(initial.value()));
+
+  double firstResidual = 0.0;
+  double lastResidual = 0.0;
+  for (int i = 0; i < 400; ++i) {
+    const SolverMonitor monitor = solver.iterate();
+    ASSERT_TRUE(std::isfinite(monitor.residuals.continuity)) << "diverged at " << i;
+    ASSERT_TRUE(std::isfinite(monitor.residuals.momentumX)) << "diverged at " << i;
+    if (i == 0) {
+      firstResidual = monitor.residuals.continuity;
+    }
+    lastResidual = monitor.residuals.continuity;
+  }
+  EXPECT_LT(lastResidual, firstResidual) << "residuals are not coming down";
+
+  // Physically reasonable: a 12% thick section at zero incidence accelerates
+  // the stream by roughly a tenth, and nothing anywhere should be wild.
+  double peakSpeed = 0.0;
+  for (std::size_t c = 0; c < mesh.cellCount(); ++c) {
+    const double speed = length(solver.field().velocity[c]);
+    ASSERT_TRUE(std::isfinite(speed)) << "cell " << c;
+    peakSpeed = std::max(peakSpeed, speed);
+  }
+  EXPECT_GT(peakSpeed, 1.02 * stream.speed) << "no acceleration over the section";
+  EXPECT_LT(peakSpeed, 1.35 * stream.speed) << "implausible acceleration";
 }
 
 }  // namespace

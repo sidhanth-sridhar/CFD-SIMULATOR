@@ -163,6 +163,24 @@ Result<Mesh> generateCGrid(const geom::Airfoil& airfoil, const CGridOptions& opt
   const std::vector<double> wakeFraction =
       geometricDistribution(trailingSpacing, wakeLength, wakeNodes);
 
+  // The far field gets its *own*, much gentler distribution rather than
+  // inheriting the one above.
+  //
+  // Copying the inner spacing outwards makes the grid lines in the wake
+  // exactly vertical, which looks tidy and is a trap: the surface clustering
+  // near the trailing edge is around 1e-4 chords, so the outermost cells end
+  // up 1e-4 wide and a whole chord tall - aspect ratios of 10^4 out where the
+  // flow is uniform and nothing needs resolving. Those cells make the pressure
+  // equation violently stiff and were enough to diverge the solver outright.
+  //
+  // Starting from half the uniform spacing instead keeps far-field cells
+  // well shaped. The grid lines shear rather than staying vertical, but only
+  // by the difference in x over the full domain height - a fraction of a
+  // percent, and invisible in the result.
+  const double outerSpacing = wakeLength / (2.0 * static_cast<double>(wakeNodes));
+  const std::vector<double> outerWakeFraction =
+      geometricDistribution(outerSpacing, wakeLength, wakeNodes);
+
   // --- outer boundary shape ---
   const double halfHeight = options.verticalChords * c;
   const double frontRadius = xTrailing + options.upstreamChords * c;  // semi-axis in x
@@ -177,13 +195,17 @@ Result<Mesh> generateCGrid(const geom::Airfoil& airfoil, const CGridOptions& opt
     // the node nearest the trailing edge is the last one.
     const double s = wakeFraction[static_cast<std::size_t>(wakeNodes - i)] * wakeLength;
     const double x = xTrailing + s;
+    const double outerS =
+        outerWakeFraction[static_cast<std::size_t>(wakeNodes - i)] * wakeLength;
+    const double outerX = xTrailing + outerS;
+
     inner[static_cast<std::size_t>(i)] = Vec2{x, 0.0};
-    outer[static_cast<std::size_t>(i)] = Vec2{x, -halfHeight};
+    outer[static_cast<std::size_t>(i)] = Vec2{outerX, -halfHeight};
 
     // Upper side, mirrored, so the two sides of the cut coincide exactly.
     const int mirror = ni - 1 - i;
     inner[static_cast<std::size_t>(mirror)] = Vec2{x, 0.0};
-    outer[static_cast<std::size_t>(mirror)] = Vec2{x, halfHeight};
+    outer[static_cast<std::size_t>(mirror)] = Vec2{outerX, halfHeight};
   }
 
   for (int k = 0; k < wallNodes; ++k) {

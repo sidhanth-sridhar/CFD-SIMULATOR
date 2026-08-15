@@ -276,9 +276,17 @@ TEST(LinearSystem, DetectsSymmetry) {
   std::vector<double> rhs(mesh.cellCount(), 1.0);
   LinearSystem system = laplacian(mesh, rhs);
 
-  EXPECT_TRUE(system.isSymmetric());
-  system.upper[0] += 1.0;
-  EXPECT_FALSE(system.isSymmetric());
+  EXPECT_TRUE(system.isSymmetric(mesh));
+
+  // Perturb an *interior* face: boundary faces carry no off-diagonal pair, so
+  // asymmetry there is not meaningful and is deliberately not reported.
+  std::size_t interior = 0;
+  while (interior < mesh.faceCount() && !mesh.faces()[interior].isInterior()) {
+    ++interior;
+  }
+  ASSERT_LT(interior, mesh.faceCount());
+  system.upper[interior] += 1.0;
+  EXPECT_FALSE(system.isSymmetric(mesh));
 }
 
 TEST(GaussSeidel, DrivesTheResidualDown) {

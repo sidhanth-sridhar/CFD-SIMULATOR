@@ -15,6 +15,17 @@ void LinearSystem::clear() {
   std::fill(lower.begin(), lower.end(), 0.0);
 }
 
+int oppositeCell(const mesh::Mesh& mesh, std::size_t face) noexcept {
+  const mesh::Face& f = mesh.faces()[face];
+  if (f.neighbour >= 0) {
+    return f.neighbour;
+  }
+  if (f.boundary == mesh::BoundaryType::WakeCut && f.partner >= 0) {
+    return mesh.faces()[static_cast<std::size_t>(f.partner)].owner;
+  }
+  return -1;
+}
+
 void LinearSystem::multiply(const mesh::Mesh& mesh, const std::vector<double>& x,
                             std::vector<double>& y) const {
   y.assign(diagonal.size(), 0.0);
@@ -23,13 +34,22 @@ void LinearSystem::multiply(const mesh::Mesh& mesh, const std::vector<double>& x
   }
   for (std::size_t f = 0; f < mesh.faceCount(); ++f) {
     const mesh::Face& face = mesh.faces()[f];
-    if (face.neighbour < 0) {
-      continue;  // boundary contributions are folded into diagonal and source
+
+    if (face.neighbour >= 0) {
+      const auto owner = static_cast<std::size_t>(face.owner);
+      const auto neighbour = static_cast<std::size_t>(face.neighbour);
+      y[owner] += upper[f] * x[neighbour];
+      y[neighbour] += lower[f] * x[owner];
+      continue;
     }
-    const auto owner = static_cast<std::size_t>(face.owner);
-    const auto neighbour = static_cast<std::size_t>(face.neighbour);
-    y[owner] += upper[f] * x[neighbour];
-    y[neighbour] += lower[f] * x[owner];
+
+    // A wake cut face contributes to its owner's row only; the partner face
+    // carries the mirror term for the cell on the other side.
+    const int across = oppositeCell(mesh, f);
+    if (across >= 0) {
+      y[static_cast<std::size_t>(face.owner)] += upper[f] * x[static_cast<std::size_t>(across)];
+    }
+    // Ordinary boundary contributions are folded into diagonal and source.
   }
 }
 
@@ -52,8 +72,11 @@ double LinearSystem::diagonalL1() const {
   return total;
 }
 
-bool LinearSystem::isSymmetric(double tolerance) const {
+bool LinearSystem::isSymmetric(const mesh::Mesh& mesh, double tolerance) const {
   for (std::size_t f = 0; f < upper.size(); ++f) {
+    if (mesh.faces()[f].neighbour < 0) {
+      continue;  // boundary, or a wake cut whose pair carries the mirror term
+    }
     const double scale = std::max({std::abs(upper[f]), std::abs(lower[f]), 1.0});
     if (std::abs(upper[f] - lower[f]) > tolerance * scale) {
       return false;
@@ -82,13 +105,20 @@ void gaussSeidel(const mesh::Mesh& mesh, const LinearSystem& system, std::vector
       for (const int faceIndex : mesh.cellFaces()[c]) {
         const auto f = static_cast<std::size_t>(faceIndex);
         const mesh::Face& face = mesh.faces()[f];
-        if (face.neighbour < 0) {
+
+        if (face.neighbour >= 0) {
+          if (face.owner == static_cast<int>(c)) {
+            offDiagonal += system.upper[f] * x[static_cast<std::size_t>(face.neighbour)];
+          } else {
+            offDiagonal += system.lower[f] * x[static_cast<std::size_t>(face.owner)];
+          }
           continue;
         }
-        if (face.owner == static_cast<int>(c)) {
-          offDiagonal += system.upper[f] * x[static_cast<std::size_t>(face.neighbour)];
-        } else {
-          offDiagonal += system.lower[f] * x[static_cast<std::size_t>(face.owner)];
+        // Wake cut: this cell owns the face, and its coefficient multiplies
+        // the cell on the far side of the slit.
+        const int across = oppositeCell(mesh, f);
+        if (across >= 0 && face.owner == static_cast<int>(c)) {
+          offDiagonal += system.upper[f] * x[static_cast<std::size_t>(across)];
         }
       }
       x[c] = (system.source[c] - offDiagonal) / diagonal;
