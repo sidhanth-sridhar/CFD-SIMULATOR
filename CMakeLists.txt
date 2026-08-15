@@ -76,6 +76,7 @@ configure_file("${PROJECT_SOURCE_DIR}/cmake/Version.hpp.in"
 # ---------------------------------------------------------------------------
 add_subdirectory(src/core)
 add_subdirectory(src/geom)
+add_subdirectory(src/mesh)
 
 if(CFD_BUILD_APP)
   add_subdirectory(src/app)
