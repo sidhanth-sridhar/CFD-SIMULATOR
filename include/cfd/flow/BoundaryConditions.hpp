@@ -91,6 +91,32 @@ struct BoundaryConditions {
   [[nodiscard]] Status validate() const;
 };
 
+/// The condition on one face, with whatever values it imposes.
+///
+/// Patch-level conditions cannot express everything a solver needs to be
+/// verified against: plane Poiseuille flow wants a parabolic inlet profile,
+/// and a moving wall wants a non-zero velocity on a surface. Carrying the
+/// imposed values per face rather than per patch makes those expressible
+/// without inventing a patch for every station.
+struct FaceCondition {
+  BoundaryKind kind{BoundaryKind::Internal};
+  /// Imposed velocity, for Inlet and for a wall that moves.
+  Vec2 velocity{};
+  /// Imposed pressure, for Outlet and for far-field outflow.
+  double pressure{0.0};
+};
+
+using FaceConditions = std::vector<FaceCondition>;
+
+/// Expand patch-level conditions to one entry per face.
+///
+/// Far-field faces keep the FarField kind rather than being resolved to inlet
+/// or outlet here: which one they act as depends on the flow direction, and
+/// that changes as a solution develops.
+[[nodiscard]] Result<FaceConditions> buildFaceConditions(
+    const mesh::Mesh& mesh, const BoundaryConditions& conditions,
+    const FreestreamConditions& freestream);
+
 /// Velocity and pressure on every face of the mesh.
 ///
 /// Interior and wake-cut faces are interpolated from the cells they separate;

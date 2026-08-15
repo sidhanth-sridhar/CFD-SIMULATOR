@@ -19,13 +19,15 @@ add_executable(cfd_tests
     FlowFieldTests.cpp
     LogTests.cpp
     MeshTests.cpp
-    Naca4Tests.cpp)
+    Naca4Tests.cpp
+    SolverTests.cpp
+    ValidationTests.cpp)
 
-# cfd::flow carries mesh, geometry and core PUBLICly, so naming those again
-# here would only make the linker warn about duplicates.
+# cfd::solver carries flow, mesh, geometry and core PUBLICly, so naming those
+# again here would only make the linker warn about duplicates.
 target_link_libraries(cfd_tests
     PRIVATE
-        cfd::flow
+        cfd::solver
         cfd::warnings
         GTest::gtest_main)
 

@@ -5,7 +5,9 @@
 # mesh can be generated and checked in a headless run.
 
 add_library(cfd_mesh STATIC
+    BoxGrid.cpp
     CGrid.cpp
+    Distribution.cpp
     Mesh.cpp)
 
 add_library(cfd::mesh ALIAS cfd_mesh)

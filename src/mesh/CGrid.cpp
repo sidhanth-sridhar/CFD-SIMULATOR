@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "cfd/core/Log.hpp"
+#include "cfd/mesh/Distribution.hpp"
 
 namespace cfd::mesh {
 namespace {
@@ -30,78 +31,6 @@ Vec2 rotate(const Vec2& v, double angle) noexcept {
 double smoothStep(double x) noexcept {
   const double t = std::clamp(x, 0.0, 1.0);
   return t * t * (3.0 - 2.0 * t);
-}
-
-/// Ratio r of a geometric series with `intervals` terms, first term `first`,
-/// summing to `total`. Solved by bisection.
-///
-/// The layers off a wall have to start very thin and end up comparable to the
-/// far-field spacing - four orders of magnitude apart. A geometric progression
-/// is the standard way to bridge that: each layer is a fixed multiple of the
-/// one before, so the growth is smooth and the solver sees no abrupt jump in
-/// cell size. Fixing the first layer and the total distance determines the
-/// ratio implicitly, through
-///
-///     first * (r^n - 1) / (r - 1) = total
-///
-/// which has no closed form, hence bisection. It is monotone in r, so
-/// bisection is guaranteed to converge.
-double solveGeometricRatio(double first, double total, int intervals) noexcept {
-  if (intervals <= 1 || first <= 0.0 || total <= 0.0) {
-    return 1.0;
-  }
-  const double uniform = first * static_cast<double>(intervals);
-  if (uniform >= total) {
-    return 1.0;  // the requested first layer already fills the gap
-  }
-
-  const auto sum = [first, intervals](double r) {
-    if (std::abs(r - 1.0) < 1e-12) {
-      return first * static_cast<double>(intervals);
-    }
-    return first * (std::pow(r, static_cast<double>(intervals)) - 1.0) / (r - 1.0);
-  };
-
-  double lo = 1.0;
-  double hi = 3.0;
-  if (sum(hi) < total) {
-    return hi;  // even aggressive growth cannot span it; caller renormalises
-  }
-  for (int iteration = 0; iteration < 200; ++iteration) {
-    const double mid = 0.5 * (lo + hi);
-    if (sum(mid) < total) {
-      lo = mid;
-    } else {
-      hi = mid;
-    }
-  }
-  return 0.5 * (lo + hi);
-}
-
-/// Normalised cumulative positions 0 = t_0 < t_1 < ... < t_n = 1 following a
-/// geometric progression whose first step is `first / total`.
-std::vector<double> geometricDistribution(double first, double total, int intervals) {
-  std::vector<double> t(static_cast<std::size_t>(intervals) + 1, 0.0);
-  const double ratio = solveGeometricRatio(first, total, intervals);
-
-  double step = first;
-  double accumulated = 0.0;
-  for (int k = 1; k <= intervals; ++k) {
-    accumulated += step;
-    t[static_cast<std::size_t>(k)] = accumulated;
-    step *= ratio;
-  }
-
-  // Renormalise so the last point lands exactly on 1. This also absorbs the
-  // small error left when the bracket in solveGeometricRatio was hit.
-  if (accumulated > 0.0) {
-    for (double& value : t) {
-      value /= accumulated;
-    }
-  }
-  t.front() = 0.0;
-  t.back() = 1.0;
-  return t;
 }
 
 /// Signed curvature of a polyline at each interior node, from the turning

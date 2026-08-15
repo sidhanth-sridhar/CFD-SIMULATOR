@@ -70,6 +70,32 @@ Status BoundaryConditions::validate() const {
   return Status::ok();
 }
 
+Result<FaceConditions> buildFaceConditions(const mesh::Mesh& mesh,
+                                           const BoundaryConditions& conditions,
+                                           const FreestreamConditions& freestream) {
+  if (const Status valid = conditions.validate(); !valid) {
+    return valid.error();
+  }
+  if (const Status valid = freestream.validate(); !valid) {
+    return valid.error();
+  }
+
+  const Vec2 streamVelocity = freestream.velocity();
+
+  FaceConditions perFace(mesh.faceCount());
+  for (std::size_t f = 0; f < mesh.faceCount(); ++f) {
+    const BoundaryKind kind = conditions.kindFor(mesh.faces()[f].boundary);
+    perFace[f].kind = kind;
+    perFace[f].pressure = freestream.referencePressure;
+
+    // A wall is stationary unless a caller says otherwise; everything else
+    // that imposes a velocity imposes the stream.
+    perFace[f].velocity =
+        (kind == BoundaryKind::NoSlipWall) ? Vec2{0.0, 0.0} : streamVelocity;
+  }
+  return perFace;
+}
+
 bool FaceState::isConsistent() const noexcept {
   const std::size_t n = velocity.size();
   return pressure.size() == n && kind.size() == n && inflow.size() == n;
