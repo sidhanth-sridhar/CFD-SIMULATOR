@@ -1550,3 +1550,330 @@ solver later proves sensitive to it.
   difference between a display you can reason from and one that quietly lies.
 
 **Next:** Phase 3 — the Navier-Stokes discretisation, on explicit instruction.
+
+---
+
+# Phase 3 — Flow State and Boundary Conditions
+
+**Completed:** 2026-08-15
+**Outcome:** 168/168 tests pass; the program initialises a flow around the
+section, applies conditions to every face, and can show where the
+initialisation fails to satisfy them.
+
+## 1. Scope
+
+Solver *infrastructure*, not a solver. This phase adds the state a solver
+operates on and the boundary values it will assemble fluxes from. It adds
+`cfd_flow`, sitting on `cfd_mesh`.
+
+Nothing is solved. No momentum equation is discretised, nothing is stepped in
+time, and the momentum residuals are zero because there is nothing yet to leave
+a residual behind. §8 says exactly what was and was not checked.
+
+## 2. What was implemented
+
+| Component | Location | Purpose |
+|---|---|---|
+| `FreestreamConditions` | `Freestream.hpp/.cpp` | Operating point; derived velocity, dynamic pressure, viscosity |
+| `FlowField` | `FlowField.hpp/.cpp` | Cell-centred velocity, pressure, density, viscosity |
+| `TimeState`, `ResidualSet`, `ResidualHistory` | `FlowField.hpp/.cpp` | Where the run has got to, and how far from converged |
+| `BoundaryConditions`, `FaceState` | `BoundaryConditions.hpp/.cpp` | Five condition kinds; per-face evaluation |
+| `divergence`, `continuityResidual` | `BoundaryConditions.cpp` | The check that validates the whole chain |
+| Flow panel, field renderer | `Panels.cpp` | Controls, inspection, colour-mapped shading |
+| Tests | `FlowFieldTests.cpp`, `BoundaryConditionTests.cpp` | 34 new cases |
+
+---
+
+## 3. The physics decisions, and why they are decisions
+
+### 3.1 Reynolds number as an input, not an output
+
+A section's behaviour is not set by speed, size or fluid separately, but by one
+dimensionless combination:
+
+$$Re = \frac{\rho\,U\,c}{\mu}$$
+
+**Each term**
+
+| Symbol | Meaning | Units |
+|---|---|---|
+| $\rho$ | density | kg/m³ |
+| $U$ | freestream speed | m/s |
+| $c$ | chord — the reference length | m |
+| $\mu$ | dynamic viscosity | Pa·s |
+
+It is the ratio of inertial to viscous forces. Two flows at the same $Re$ over
+the same shape *are the same flow*, whatever the actual speed and scale — which
+is the entire reason a wind-tunnel model says anything about a full-size wing.
+It also decides the character of the answer: at $Re \sim 10^3$ viscosity
+dominates and the flow is orderly; at the $10^6$ typical of aerofoil work the
+boundary layer is thin and usually turbulent, and whether it separates is the
+question Phases 5–7 exist to answer.
+
+So the natural way to pose the problem is "give me $Re$", and let $\mu$ follow.
+Specifying a real air viscosity instead would pin $Re$ to whatever the geometry
+and speed happened to produce — which is backwards, and makes it impossible to
+match a published dataset.
+
+### 3.2 Constant density
+
+At the speeds this solver targets the Mach number is low enough that density
+varies by well under a percent. Treating it as constant removes an entire
+equation (the energy equation) and decouples thermodynamics from the problem
+entirely. It is stored per cell anyway, for symmetry with viscosity — which
+will *not* stay uniform, because the turbulence model adds an eddy viscosity
+that varies by orders of magnitude across the boundary layer.
+
+### 3.3 Gauge pressure
+
+Only *differences* in pressure drive an incompressible flow; the absolute level
+never appears in the equations. So the reference pressure is a datum and zero
+is the natural choice. This is also why one boundary must set a pressure — see
+§4.3.
+
+---
+
+## 4. Boundary conditions
+
+The Navier-Stokes equations describe the interior and have infinitely many
+solutions until you say what happens at the edges. *Which* solution you get —
+attached or separated, lifting or not — is decided there. This is the part of a
+CFD setup that is easiest to get quietly wrong.
+
+### 4.1 "Applying" a condition means producing face values
+
+A finite-volume solver never needs a boundary condition in the abstract. It
+needs, for every face, a velocity and a pressure to build a flux from. So
+`evaluateFaces` turns the interior state plus the stated conditions into a
+value on **every** face — interior ones by interpolation, boundary ones by
+their condition. That single array is the direct input to Phase 4's flux
+assembly.
+
+### 4.2 What each kind fixes, and what it must not
+
+| Kind | Imposes | Extrapolates |
+|---|---|---|
+| Inlet | velocity | pressure |
+| Outlet | pressure | velocity |
+| Far field | per face, by the sign of $u \cdot n$ | the other |
+| No-slip wall | $u = 0$ | pressure |
+| Internal | nothing | both |
+
+The pattern is the same throughout: **fix some quantities, let the equations
+determine the rest.** Fixing both velocity and pressure at a boundary
+over-determines the problem and it has no solution.
+
+**No-slip** is the one that matters most. Both components vanish: no flow
+*through* the surface, which is geometry, and no flow *along* it, which is
+viscosity. That second half is the entire origin of the boundary layer, of skin
+friction, and of stall. Pressure is extrapolated because across a thin boundary
+layer the wall-normal pressure gradient is negligible.
+
+**Outlet imposing pressure rather than velocity** is not arbitrary. Imposing a
+velocity at the outflow is the classic way to make an incompressible solve fail
+outright, because nothing then guarantees that as much leaves as entered.
+
+**Far field is not all inflow.** The outer boundary of an external flow takes
+fluid in at the front and lets it out behind, so each face is classified by the
+sign of $u \cdot n$ and treated accordingly. Applying a plain inlet to the whole
+outer boundary would force fluid *in* through faces the flow is trying to leave
+by. At zero incidence the run reports 322 inflow faces and 108 outflow — a
+split you cannot work out by looking at the geometry, which is exactly why the
+viewport colours it.
+
+**The wake cut is not a boundary at all.** Its two sides coincide in space and
+fluid crosses freely, so it is interpolated across using the partner face's
+owner. Treating it as a wall would put an invisible plate down the middle of
+the wake.
+
+### 4.3 Well-posedness is checked, not assumed
+
+`BoundaryConditions::validate` rejects two configurations:
+
+- **No pressure anchor.** With velocity imposed on every boundary, the
+  incompressible pressure field is determined only up to a constant and the
+  linear system for it is singular. Better to say so now than to watch a solver
+  fail to converge in Phase 4 for reasons that look numerical.
+- **An internal airfoil.** Fluid would pass straight through the surface.
+
+---
+
+## 5. The divergence check
+
+**Physical meaning.** An incompressible fluid cannot be compressed or created,
+so whatever volume enters a cell must leave it. The net flux out of every cell
+must be zero.
+
+$$\nabla \cdot \mathbf{u}\big|_{\text{cell}} = \frac{1}{V}\sum_{\text{faces}} (\mathbf{u}_f \cdot \mathbf{n}_f)\,A_f$$
+
+**Each term**
+
+| Symbol | Meaning | Units (2D) |
+|---|---|---|
+| $\mathbf{u}_f$ | velocity on the face | m/s |
+| $\mathbf{n}_f$ | outward unit normal, pointing out of the owner | – |
+| $A_f$ | face area — a length in 2D | m |
+| $V$ | cell volume — an area in 2D | m² |
+
+This is the sharpest single check available at this stage, because a **uniform**
+velocity gives exactly zero on any valid mesh:
+
+$$\sum \mathbf{u} \cdot \mathbf{n}\,A = \mathbf{u} \cdot \sum \mathbf{n}A = \mathbf{u} \cdot \mathbf{0} = 0$$
+
+using the closure identity Phase 2 already tested. So one assertion exercises
+the mesh metrics, the face interpolation and the flux sign convention
+simultaneously. If any of them is wrong, this is not zero.
+
+And with the no-slip wall switched back on, the balance **must** fail — the wall
+face contributes no flux while the other three still carry the stream. The test
+asserts the imbalance is confined to the wall-adjacent cells, more than a
+thousand times larger there than anywhere else.
+
+That failure is not a defect. It is the precise statement of what a uniform
+initialisation is: a guess that satisfies the far field everywhere and the wall
+nowhere. Removing the imbalance is exactly what a solver does. Showing it is
+the most honest thing this phase can display, which is why **Divergence** is a
+field view: neutral across the entire domain, with a thin rim of colour hard
+against the surface.
+
+---
+
+## 6. Visualising a field that has no structure yet
+
+The initialised velocity field is uniform, so shading cells by it produces a
+flat colour. That is the truthful picture and the legend says so — it prints
+"uniform 50" rather than labelling both ends of the colour bar with the same
+number, which would imply a variation that is not there.
+
+Two decisions about the colour maps:
+
+- **Viridis for unsigned quantities.** Perceptually uniform: equal steps in
+  value look like equal steps in colour, and it survives greyscale printing and
+  colour-blind viewers.
+- **A diverging map centred on zero for signed ones** (velocity components,
+  divergence), so that zero is the neutral midpoint and cannot be mistaken for
+  a small positive value.
+- **No rainbow map.** It invents boundaries where the data has none, which in a
+  flow field reads as structure that is not there. That is the same failure
+  mode as a silently decimated mesh, in a different costume.
+
+The panel states in amber that this is an initialised field, that no equations
+have been solved, and that the momentum residuals are zero because there is no
+momentum equation. A viewer who mistakes this screen for a solution has been
+misled by the software, not by their own carelessness.
+
+---
+
+## 7. Problems encountered
+
+**A tolerance below one ULP.** `ViscosityScalesWithChord` compared
+$3\mu(1)$ with $\mu(3)$ to an absolute `1e-20`, on values around `1.8e-4` where
+one unit in the last place is `2.7e-20`. GoogleTest diagnosed it precisely —
+the check had silently become an exact-equality test. Switched to relative
+tolerances, and audited the other tight absolute tolerances in the same file
+for the same mistake. The lesson generalises: an absolute tolerance is only
+meaningful once you know the magnitude it will be applied to.
+
+**The far-field split at exactly zero incidence.** At $\alpha = 0$ the top and
+bottom straight sections of the outer boundary have normals exactly
+$(0, \pm 1)$, so $u \cdot n = 0$ — neither inflow nor outflow. The
+classification treats those as outflow, which sets a pressure there rather than
+forcing a velocity. That is the safe choice for a tangential far-field face,
+and it is why the reported split is 322/108 rather than something symmetric.
+
+**The panel outgrew the window.** With Geometry, Mesh and Flow all expanded the
+left panel no longer fits. Collapsed the Build/Graphics/Viewport/Pipeline
+sections by default — they are reference material, whereas the three pipeline
+stages are what the user is actually working with.
+
+**`--flow` inherited the wrong framing.** Because `--flow` implies a mesh, it
+also inherited the mesh flag's "fit the whole domain" behaviour, which put the
+section at three pixels across — useless for looking at a near-wall field. Now
+only `--mesh` on its own means "show me the domain".
+
+---
+
+## 8. Status at the end of Phase 3
+
+**Verified by running it**
+
+- Clean configure, build and test; zero warnings with `-DCFD_WARNINGS_AS_ERRORS=ON`.
+- 168/168 tests pass.
+- The program initialises a flow around NACA 2412 on a C-grid and reports
+  derived quantities that check out by hand: $q = 1531.3$ Pa for
+  $\rho = 1.225$, $U = 50$; $\mu = 6.125\times10^{-5}$ Pa·s at $Re = 10^6$,
+  $c = 1$; $\nu = \mu/\rho = 5.0\times10^{-5}$ m²/s.
+- Boundary conditions are inspectable: 318 wall faces, 142 outlet, 322 far-field
+  inflow, 108 far-field outflow, 112 wake cut — and 322 + 108 equals the mesh's
+  430 far-field faces.
+- The divergence view is neutral across the domain with a thin rim at the
+  surface, as the physics requires.
+
+**Checked numerically**
+
+- Uniform flow is divergence-free to machine precision when no wall interferes.
+- The no-slip wall breaks that balance by a factor of more than 10³ only in the
+  cells it touches.
+- The imbalance scales linearly with freestream speed, as a flux must.
+- Every condition imposes what it claims and extrapolates what it claims.
+
+**Not verified — and not implemented**
+
+- **No equations are solved.** No momentum discretisation, no pressure-velocity
+  coupling, no time stepping. The momentum residuals are structurally zero.
+- No turbulence model, as specified.
+- The wake cut is represented and interpolated correctly but has still never
+  carried a flux driven by anything other than a uniform field.
+- No comparison with wind-tunnel data or another CFD code.
+- Still only built and run on macOS 15.7 / arm64 / Apple Clang 17.
+
+## 9. What to understand before Phase 4
+
+1. **`FaceState` is the input to flux assembly.** Phase 4 loops over faces,
+   computes a flux from the face values, adds it to the owner and subtracts it
+   from the neighbour. The outward-from-owner normal convention is what makes
+   that sign bookkeeping work.
+2. **The divergence routine becomes the continuity equation.** It is already
+   the discrete $\nabla \cdot \mathbf{u}$; the solver's job is to drive it to
+   zero by adjusting pressure.
+3. **Pressure has no equation of its own** in an incompressible flow. It is
+   whatever field makes the velocity divergence-free — which is why
+   pressure-velocity coupling (SIMPLE, PISO, projection methods) exists at all,
+   and why one boundary must anchor it.
+4. **Convection is not symmetric.** Central differencing of the convective term
+   is unstable at any appreciable cell Reynolds number; upwinding is stable but
+   diffusive. That trade-off is the first real numerical decision of Phase 4.
+5. **The mesh already constrains the scheme.** Cells with aspect ratios of
+   30,000 have a very small dimension, and an explicit scheme's time step is
+   set by the smallest one. This is the argument for implicit time stepping, and
+   it was decided back in Phase 2.
+
+## 10. What I learned
+
+- **Boundary conditions are where the physics actually lives.** The interior
+  equations are the same for every aerofoil ever flown; the answer is decided
+  by what you assert at the edges. Writing out what each kind fixes and what it
+  must leave alone — and *why* imposing a velocity at the outlet breaks an
+  incompressible solve — was more clarifying than any amount of code.
+
+- **A property that holds exactly is worth more than a test of the code you
+  just wrote.** The divergence-free check is one assertion that validates mesh
+  metrics, interpolation and flux signs at once, and it does so against a
+  mathematical identity rather than against my own implementation. Testing
+  against yourself proves only that you were consistent.
+
+- **The most informative thing to show can be the error.** Every "real" field
+  in this phase is flat and boring. The divergence — which is *nothing but* the
+  discrepancy — is the one view with structure in it, and it happens to explain
+  precisely why the next phase needs to exist.
+
+- **Tolerances need a magnitude.** `1e-20` looked rigorous and was actually an
+  exact-equality test in disguise. Absolute tolerances only mean something once
+  you know the scale of what you are comparing.
+
+- **Say what the software has not done.** It would have been easy to render a
+  flat velocity field, label it "flow field", and let it look like a result. The
+  amber note, the "uniform" legend and the zeroed momentum residuals cost very
+  little and are the difference between a tool and a demo.
+
+**Next:** Phase 4 — the Navier-Stokes discretisation, on explicit instruction.

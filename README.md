@@ -3,18 +3,23 @@
 A 2D Reynolds-Averaged Navier-Stokes solver for NACA airfoil sections, with an
 interactive viewer.
 
-**Status: Phase 2 — computational domain and mesh. No CFD is implemented.**
+**Status: Phase 3 — flow state and boundary conditions. No equations are solved yet.**
 
-The application generates NACA four-digit sections and builds a structured
-C-grid around them. Type a designation such as `NACA 2412`, tick **Generate
-mesh**, and the computational domain appears with its boundaries, cell counts
-and quality measures.
+The application generates NACA four-digit sections, builds a structured C-grid
+around them, and initialises a flow field with boundary conditions applied.
+Type a designation such as `NACA 2412`, tick **Generate mesh**, then
+**Initialise flow**, and the domain appears with its conditions colour-coded
+and a shaded scalar field.
 
-There is still no discretisation of the flow equations and no solution. The
-geometry and the mesh are verified against analytic results and against a set
-of finite-volume identities (see [Validation](#validation)), but nothing here
-has been compared with wind-tunnel or reference CFD data, because nothing here
-computes a flow.
+**Nothing is solved.** The flow field is a uniform freestream initialisation —
+an initial guess that satisfies the far field everywhere and the no-slip wall
+nowhere. Selecting the **Divergence** view shows exactly that: zero across the
+domain, non-zero only in the cells touching the surface. Removing that
+imbalance is what a solver will do, and there is no solver yet.
+
+The geometry, mesh and field are verified against analytic results and against
+finite-volume identities (see [Validation](#validation)), but nothing here has
+been compared with wind-tunnel or reference CFD data.
 
 ---
 
@@ -77,6 +82,8 @@ Add `--output-on-failure` to see diagnostics from failing tests.
 | `-V`, `--version` | Version, build type, compiler |
 | `--section NAME` | Load a section at startup, e.g. `--section "NACA 2412"` |
 | `--mesh LEVEL` | Mesh at startup: `coarse`, `medium` or `fine` |
+| `--flow` | Initialise the flow at startup (implies a mesh) |
+| `--field NAME` | Shown scalar: `velocity`, `vx`, `vy`, `pressure`, `divergence` |
 | `--log-level LEVEL` | `trace`, `debug`, `info`, `warn`, `error`, `critical`, `off` |
 | `--self-check` | Headless subsystem check, then exit (this is what CTest runs) |
 | `--screenshot FILE` | Render a few frames, save the window as a BMP, exit |
@@ -131,6 +138,50 @@ When the whole domain is on screen, drawing every grid line is neither fast nor
 informative, so the view is decimated and the panel says so ("Drawing every
 *n*th grid line"). Zoom in and the full mesh is drawn.
 
+### Initialising a flow
+
+Tick **Initialise flow**. Every cell is filled with the undisturbed stream and
+the boundary conditions are applied to every face.
+
+| Input | Meaning |
+|---|---|
+| Speed | Freestream velocity magnitude, m/s |
+| Incidence | Angle of attack in degrees; positive pitches the nose up |
+| Density | kg/m³, constant (the flow is treated as incompressible) |
+| Reynolds | ρUc/μ — the viscosity is *derived* from this, not set directly |
+| Pressure | Reference static pressure, Pa (gauge) |
+
+The Reynolds number is an input rather than an output because it is the one
+dimensionless group that decides the character of the flow: two flows at the
+same Re over the same shape are the same flow, whatever the actual speed and
+scale. Specifying a real air viscosity instead would pin Re to whatever the
+geometry and speed happened to produce.
+
+**Boundary conditions**
+
+| Condition | Imposes | Takes from the interior |
+|---|---|---|
+| Inlet | velocity | pressure |
+| Outlet | pressure | velocity |
+| Far field | acts as inlet or outlet per face, by the sign of u·n | the other |
+| No-slip wall | velocity = 0, both components | pressure |
+| Internal | nothing — the wake cut is interpolated across | both |
+
+Each is colour-coded in the viewport, with the far field split by whether the
+stream is entering or leaving that face — the part you cannot work out by
+looking at the geometry. The panel reports how many faces ended up carrying
+each condition.
+
+You cannot impose everything at a boundary: fixing both velocity and pressure
+over-determines the problem. Conversely, if no boundary sets a pressure the
+incompressible pressure field is only determined up to a constant, and the
+configuration is rejected rather than left to fail later.
+
+**Field views**: velocity magnitude, either velocity component, pressure, or
+divergence. Signed quantities use a diverging colour map centred on zero;
+unsigned ones use viridis. Both are perceptually uniform, and a rainbow map is
+deliberately avoided because it invents boundaries the data does not have.
+
 ### Viewport controls
 
 | Input | Action |
@@ -154,12 +205,14 @@ CFD-SIMULATOR/
 │   ├── core/                   BuildInfo, Error/Result, Log, Vec2
 │   ├── geom/                   Naca4, Airfoil
 │   ├── mesh/                   Mesh, CGrid
+│   ├── flow/                   Freestream, FlowField, BoundaryConditions
 │   └── app/                    Application, Camera2D
 ├── src/
 │   ├── main.cpp                CLI parsing and startup
 │   ├── core/                   cfd_core — no GUI, no CFD, no platform code
 │   ├── geom/                   cfd_geometry — NACA equations and discretisation
 │   ├── mesh/                   cfd_mesh — domain, C-grid, finite-volume metrics
+│   ├── flow/                   cfd_flow — state, boundary conditions, divergence
 │   └── app/                    cfd_app — GLFW, OpenGL and Dear ImGui live here only
 └── tests/                      GoogleTest suite, registered with CTest
 ```
@@ -167,7 +220,7 @@ CFD-SIMULATOR/
 ### Module boundaries
 
 ```
-cfd_sim ──▶ cfd_app ──▶ cfd_mesh ──▶ cfd_geometry ──▶ cfd_core ──▶ std
+cfd_sim ──▶ cfd_app ──▶ cfd_flow ──▶ cfd_mesh ──▶ cfd_geometry ──▶ cfd_core ──▶ std
                 │
                 └──▶ Dear ImGui, GLFW, OpenGL
 ```
@@ -214,6 +267,20 @@ The mesh tests check the properties a finite-volume solver depends on:
   monotonically with resolution, and the total domain area converges to the
   analytic area of the domain.
 
+The flow tests check the freestream derivations, the field initialisation, and
+what each boundary condition actually imposes — that wall faces really are at
+zero velocity, that outlets carry the reference pressure, that the far field
+splits into inflow and outflow, and that wake-cut faces are interpolated rather
+than clamped.
+
+The sharpest of them is the divergence check. A uniform velocity has zero
+divergence analytically, and discretely the net flux out of a cell is
+`u · Σ nA = u · 0 = 0`, because the outward area vectors of a closed cell sum
+to zero. So one assertion exercises the mesh metrics, the face interpolation
+and the flux sign convention at once. With the no-slip wall switched back on
+the balance must fail, and only in the cells touching the wall — which is not a
+defect but the reason a solver is needed.
+
 No comparison has been made against wind-tunnel data or another CFD code.
 
 ## Dependencies
@@ -230,11 +297,11 @@ reproduces the exact same sources or fails loudly.
 
 ## Roadmap
 
-Phases 0 to 2 are complete. Later phases build on them in order:
+Phases 0 to 3 are complete. Later phases build on them in order:
 
 1. ~~NACA 4-digit geometry generation~~ — done
 2. ~~Mesh generation around the section~~ — done
-3. Navier-Stokes discretisation
+3. Navier-Stokes discretisation — *state and boundary conditions in place; no equations solved*
 4. Reynolds averaging (RANS)
 5. k-ω SST turbulence closure
 6. Force and moment integration (lift, drag, moment coefficients)
