@@ -34,6 +34,8 @@ struct Options {
   std::string screenshotPath;
   std::string section;
   std::string meshResolution;
+  bool initialiseFlow{false};
+  std::string fieldView;
 };
 
 void printUsage() {
@@ -51,6 +53,9 @@ void printUsage() {
       "                          e.g. --section \"NACA 2412\"\n"
       "      --mesh LEVEL        Generate the mesh at startup:\n"
       "                          coarse, medium or fine\n"
+      "      --flow              Initialise the flow at startup (implies --mesh)\n"
+      "      --field NAME        Shown scalar: velocity, vx, vy, pressure\n"
+      "                          or divergence\n"
       "      --self-check        Run headless startup checks and exit\n"
       "      --screenshot FILE   Render a few frames, save the window to FILE\n"
       "                          as a BMP, then exit\n"
@@ -79,6 +84,15 @@ cfd::Result<Options> parseArguments(std::span<const std::string_view> args) {
       }
       ++i;
       options.section = std::string{args[i]};
+    } else if (arg == "--field") {
+      if (i + 1 >= args.size()) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          "--field requires a name: velocity, vx, vy, pressure or divergence"};
+      }
+      ++i;
+      options.fieldView = std::string{args[i]};
+    } else if (arg == "--flow") {
+      options.initialiseFlow = true;
     } else if (arg == "--mesh") {
       if (i + 1 >= args.size()) {
         return cfd::Error{cfd::ErrorCode::InvalidArgument,
@@ -206,6 +220,8 @@ int main(int argc, char** argv) {
     appOptions.screenshotPath = options.screenshotPath;
     appOptions.initialSection = options.section;
     appOptions.initialMeshResolution = options.meshResolution;
+    appOptions.initialiseFlow = options.initialiseFlow;
+    appOptions.initialFieldView = options.fieldView;
 
     cfd::app::Application application;
     if (const cfd::Status status = application.initialize(appOptions); !status) {

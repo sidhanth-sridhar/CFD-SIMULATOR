@@ -362,6 +362,216 @@ void drawMeshLines(ImDrawList* draw, UiState& ui, ImVec2 origin) {
   }
 }
 
+/// Value the field view asks for, in cell `c`.
+double fieldValue(const UiState& ui, FieldView view, std::size_t c) {
+  const flow::FlowField& field = *ui.flow.field;
+  switch (view) {
+    case FieldView::VelocityMagnitude: return length(field.velocity[c]);
+    case FieldView::VelocityX:         return field.velocity[c].x;
+    case FieldView::VelocityY:         return field.velocity[c].y;
+    case FieldView::Pressure:          return field.pressure[c];
+    case FieldView::Divergence:
+      return (c < ui.flow.divergence.size()) ? ui.flow.divergence[c] : 0.0;
+  }
+  return 0.0;
+}
+
+/// Shade every visible cell by the selected scalar.
+///
+/// Cells are drawn as two triangles each with anti-aliasing off, so
+/// neighbouring cells tile exactly instead of blending along every shared
+/// edge - the same reason the section's fill is built that way.
+void drawScalarField(ImDrawList* draw, UiState& ui, ImVec2 origin) {
+  const mesh::Mesh& grid = *ui.meshing.mesh;
+  const flow::FlowField& field = *ui.flow.field;
+  if (field.size() != grid.cellCount()) {
+    return;
+  }
+
+  const auto [worldMin, worldMax] = ui.camera.visibleBounds();
+  const auto toScreen = [&](const Vec2& world) {
+    const Vec2 s = ui.camera.worldToScreen(world);
+    return ImVec2(static_cast<float>(static_cast<double>(origin.x) + s.x),
+                  static_cast<float>(static_cast<double>(origin.y) + s.y));
+  };
+
+  const bool signedField = isSignedField(ui.flow.view);
+  double low = ui.flow.rangeMin;
+  double high = ui.flow.rangeMax;
+  if (high <= low) {
+    // A uniform field has no range at all. Widen it a touch so the map returns
+    // its midpoint rather than dividing by zero.
+    const double pad = std::max(std::abs(high), 1.0) * 1e-6;
+    low -= pad;
+    high += pad;
+  }
+  const double span = high - low;
+
+  const ImDrawListFlags savedFlags = draw->Flags;
+  draw->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+
+  std::size_t shaded = 0;
+  for (std::size_t c = 0; c < grid.cellCount(); ++c) {
+    const std::array<int, 4>& corners = grid.cellNodes()[c];
+    const Vec2& p0 = grid.nodes()[static_cast<std::size_t>(corners[0])];
+    const Vec2& p1 = grid.nodes()[static_cast<std::size_t>(corners[1])];
+    const Vec2& p2 = grid.nodes()[static_cast<std::size_t>(corners[2])];
+    const Vec2& p3 = grid.nodes()[static_cast<std::size_t>(corners[3])];
+
+    const double cellMinX = std::min({p0.x, p1.x, p2.x, p3.x});
+    const double cellMaxX = std::max({p0.x, p1.x, p2.x, p3.x});
+    const double cellMinY = std::min({p0.y, p1.y, p2.y, p3.y});
+    const double cellMaxY = std::max({p0.y, p1.y, p2.y, p3.y});
+    if (cellMaxX < worldMin.x || cellMinX > worldMax.x || cellMaxY < worldMin.y ||
+        cellMinY > worldMax.y) {
+      continue;
+    }
+
+    const double t = (fieldValue(ui, ui.flow.view, c) - low) / span;
+    const ImU32 colour =
+        signedField ? theme::divergingColour(t) : theme::sequentialColour(t);
+
+    const ImVec2 a = toScreen(p0);
+    const ImVec2 b = toScreen(p1);
+    const ImVec2 d = toScreen(p2);
+    const ImVec2 e = toScreen(p3);
+    draw->AddTriangleFilled(a, b, d, colour);
+    draw->AddTriangleFilled(a, d, e, colour);
+    ++shaded;
+  }
+
+  draw->Flags = savedFlags;
+  ui.flow.shadedCells = shaded;
+  ui.flow.shadingComplete = true;
+}
+
+/// Colour bar for the shaded field, bottom-left of the canvas.
+void drawFieldLegend(ImDrawList* draw, const UiState& ui, ImVec2 origin, ImVec2 size) {
+  constexpr float kBarWidth = 16.0f;
+  const float barHeight = std::min(180.0f, size.y * 0.4f);
+  if (barHeight < 40.0f) {
+    return;
+  }
+
+  const float left = origin.x + 14.0f;
+  const float bottom = origin.y + size.y - 42.0f;
+  const float top = bottom - barHeight;
+
+  const bool signedField = isSignedField(ui.flow.view);
+  constexpr int kBands = 48;
+  for (int i = 0; i < kBands; ++i) {
+    const double t0 = static_cast<double>(i) / kBands;
+    const double t1 = static_cast<double>(i + 1) / kBands;
+    // Drawn bottom-up so the top of the bar is the maximum.
+    const float y0 = bottom - static_cast<float>(t1) * barHeight;
+    const float y1 = bottom - static_cast<float>(t0) * barHeight;
+    const ImU32 colour = signedField ? theme::divergingColour(0.5 * (t0 + t1))
+                                     : theme::sequentialColour(0.5 * (t0 + t1));
+    draw->AddRectFilled(ImVec2(left, y0), ImVec2(left + kBarWidth, y1), colour);
+  }
+  draw->AddRect(ImVec2(left, top), ImVec2(left + kBarWidth, bottom),
+                ImGui::GetColorU32(theme::kBorder));
+
+  const ImU32 textColour = ImGui::GetColorU32(theme::kTextDim);
+  const std::string title{toString(ui.flow.view)};
+  draw->AddText(ImVec2(left, top - ImGui::GetTextLineHeight() - 4.0f), textColour,
+                title.c_str());
+
+  // A uniform field has no range to label. Printing the same number at both
+  // ends of the bar would suggest a variation that is not there, so say what
+  // is actually true instead.
+  const double spread = ui.flow.rangeMax - ui.flow.rangeMin;
+  const double magnitude = std::max(std::abs(ui.flow.rangeMax), std::abs(ui.flow.rangeMin));
+  if (spread <= magnitude * 1e-12) {
+    draw->AddText(ImVec2(left + kBarWidth + 6.0f, top - 2.0f), textColour,
+                  std::format("uniform {:.4g}", ui.flow.rangeMax).c_str());
+    return;
+  }
+
+  draw->AddText(ImVec2(left + kBarWidth + 6.0f, top - 2.0f), textColour,
+                std::format("{:.4g}", ui.flow.rangeMax).c_str());
+  draw->AddText(ImVec2(left + kBarWidth + 6.0f, bottom - ImGui::GetTextLineHeight() + 2.0f),
+                textColour, std::format("{:.4g}", ui.flow.rangeMin).c_str());
+}
+
+/// Draw boundary faces coloured by the physical condition applied to them,
+/// rather than by the mesh patch they belong to. The distinction matters on
+/// the far field, where the same patch acts as an inlet at the front and an
+/// outlet behind.
+void drawBoundaryKinds(ImDrawList* draw, const UiState& ui, ImVec2 origin) {
+  const mesh::Mesh& grid = *ui.meshing.mesh;
+  const flow::FaceState& faces = *ui.flow.faces;
+  if (faces.size() != grid.faceCount()) {
+    return;
+  }
+
+  const auto toScreen = [&](const Vec2& world) {
+    const Vec2 s = ui.camera.worldToScreen(world);
+    return ImVec2(static_cast<float>(static_cast<double>(origin.x) + s.x),
+                  static_cast<float>(static_cast<double>(origin.y) + s.y));
+  };
+  const auto [worldMin, worldMax] = ui.camera.visibleBounds();
+
+  for (std::size_t f = 0; f < grid.faceCount(); ++f) {
+    const mesh::Face& face = grid.faces()[f];
+    if (face.isInterior()) {
+      continue;
+    }
+
+    const Vec2& a = grid.nodes()[static_cast<std::size_t>(face.nodes[0])];
+    const Vec2& b = grid.nodes()[static_cast<std::size_t>(face.nodes[1])];
+    if (std::max(a.x, b.x) < worldMin.x || std::min(a.x, b.x) > worldMax.x ||
+        std::max(a.y, b.y) < worldMin.y || std::min(a.y, b.y) > worldMax.y) {
+      continue;
+    }
+
+    const ImVec4* colour = &theme::kBcInternal;
+    switch (faces.kind[f]) {
+      case flow::BoundaryKind::NoSlipWall: colour = &theme::kBcWall; break;
+      case flow::BoundaryKind::Inlet:      colour = &theme::kBcInlet; break;
+      case flow::BoundaryKind::Outlet:     colour = &theme::kBcOutlet; break;
+      case flow::BoundaryKind::FarField:
+        colour = (faces.inflow[f] != 0) ? &theme::kBcFarFieldIn : &theme::kBcFarFieldOut;
+        break;
+      case flow::BoundaryKind::Internal:   colour = &theme::kBcInternal; break;
+    }
+    draw->AddLine(toScreen(a), toScreen(b), ImGui::GetColorU32(*colour), 1.8f);
+  }
+}
+
+/// Arrow showing the direction the stream arrives from, drawn in a fixed
+/// corner of the canvas rather than in world space so it stays legible at any
+/// zoom.
+void drawFreestreamIndicator(ImDrawList* draw, const UiState& ui, ImVec2 origin,
+                             ImVec2 size) {
+  const double alpha = ui.flow.freestream.angleOfAttackRad();
+  // Screen y grows downward, so a positive angle of attack points up-screen.
+  const auto dx = static_cast<float>(std::cos(alpha));
+  const auto dy = static_cast<float>(-std::sin(alpha));
+
+  constexpr float kLength = 46.0f;
+  const ImVec2 centre(origin.x + size.x - 78.0f, origin.y + 42.0f);
+  const ImVec2 tail(centre.x - dx * kLength * 0.5f, centre.y - dy * kLength * 0.5f);
+  const ImVec2 head(centre.x + dx * kLength * 0.5f, centre.y + dy * kLength * 0.5f);
+
+  const ImU32 colour = ImGui::GetColorU32(theme::kBcInlet);
+  draw->AddLine(tail, head, colour, 1.8f);
+  // Arrow head: two short strokes swept back from the tip.
+  const float back = 9.0f;
+  const float side = 5.0f;
+  draw->AddLine(head, ImVec2(head.x - dx * back - dy * side, head.y - dy * back + dx * side),
+                colour, 1.8f);
+  draw->AddLine(head, ImVec2(head.x - dx * back + dy * side, head.y - dy * back - dx * side),
+                colour, 1.8f);
+
+  const std::string label = std::format("U {:.4g} m/s   a {:.2f} deg",
+                                        ui.flow.freestream.speed,
+                                        ui.flow.freestream.angleOfAttackDeg);
+  const ImVec2 textSize = ImGui::CalcTextSize(label.c_str());
+  draw->AddText(ImVec2(centre.x - textSize.x * 0.5f, centre.y + 22.0f),
+                ImGui::GetColorU32(theme::kTextDim), label.c_str());
+}
+
 /// Draw boundary faces coloured by the condition they will carry.
 void drawMeshBoundaries(ImDrawList* draw, const UiState& ui, ImVec2 origin) {
   const mesh::Mesh& grid = *ui.meshing.mesh;
@@ -589,6 +799,137 @@ void updateGeometry(UiState& ui) {
   ui.meshing.dirty = true;
 }
 
+std::string_view toString(FieldView view) noexcept {
+  switch (view) {
+    case FieldView::VelocityMagnitude: return "Velocity magnitude";
+    case FieldView::VelocityX:         return "Velocity x";
+    case FieldView::VelocityY:         return "Velocity y";
+    case FieldView::Pressure:          return "Pressure";
+    case FieldView::Divergence:        return "Divergence";
+  }
+  return "Unknown";
+}
+
+bool isSignedField(FieldView view) noexcept {
+  switch (view) {
+    case FieldView::VelocityX:
+    case FieldView::VelocityY:
+    case FieldView::Divergence:
+      return true;
+    case FieldView::VelocityMagnitude:
+    case FieldView::Pressure:
+      return false;
+  }
+  return false;
+}
+
+void updateFlow(UiState& ui) {
+  FlowState& state = ui.flow;
+  if (!state.dirty) {
+    return;
+  }
+  state.dirty = false;
+
+  const auto discard = [&state]() {
+    state.field.reset();
+    state.faces.reset();
+    state.divergence.clear();
+    state.residuals = flow::ResidualSet{};
+    state.history.clear();
+    state.clock.reset();
+  };
+
+  if (!state.enabled || !ui.meshing.mesh.has_value()) {
+    discard();
+    state.errorMessage.clear();
+    return;
+  }
+
+  const mesh::Mesh& grid = *ui.meshing.mesh;
+  const double chord = ui.geometry.airfoil.has_value() ? ui.geometry.airfoil->chord() : 1.0;
+
+  Result<flow::FlowField> field =
+      flow::FlowField::uniform(grid.cellCount(), state.freestream, chord);
+  if (!field) {
+    discard();
+    state.errorMessage = field.error().message();
+    return;
+  }
+
+  Result<flow::FaceState> faces =
+      flow::evaluateFaces(grid, field.value(), state.conditions, state.freestream);
+  if (!faces) {
+    discard();
+    state.errorMessage = faces.error().message();
+    return;
+  }
+
+  Result<std::vector<double>> div = flow::divergence(grid, faces.value());
+  if (!div) {
+    discard();
+    state.errorMessage = div.error().message();
+    return;
+  }
+
+  state.errorMessage.clear();
+  state.field = std::move(field).value();
+  state.faces = std::move(faces).value();
+  state.divergence = std::move(div).value();
+  state.residuals = flow::continuityResidual(grid, state.divergence);
+
+  state.counts = FlowState::BoundaryCounts{};
+  for (std::size_t f = 0; f < grid.faceCount(); ++f) {
+    if (grid.faces()[f].isInterior()) {
+      continue;
+    }
+    switch (state.faces->kind[f]) {
+      case flow::BoundaryKind::NoSlipWall: ++state.counts.wall; break;
+      case flow::BoundaryKind::Inlet:      ++state.counts.inlet; break;
+      case flow::BoundaryKind::Outlet:     ++state.counts.outlet; break;
+      case flow::BoundaryKind::FarField:
+        if (state.faces->inflow[f] != 0) {
+          ++state.counts.farFieldIn;
+        } else {
+          ++state.counts.farFieldOut;
+        }
+        break;
+      case flow::BoundaryKind::Internal:   ++state.counts.internalCut; break;
+    }
+  }
+
+  if (state.autoRange) {
+    double low = std::numeric_limits<double>::max();
+    double high = std::numeric_limits<double>::lowest();
+    for (std::size_t c = 0; c < state.field->size(); ++c) {
+      const double value = fieldValue(ui, state.view, c);
+      low = std::min(low, value);
+      high = std::max(high, value);
+    }
+    if (isSignedField(state.view)) {
+      // Centre a signed map on zero so the neutral colour means zero.
+      const double extent = std::max(std::abs(low), std::abs(high));
+      low = -extent;
+      high = extent;
+    }
+    state.rangeMin = low;
+    state.rangeMax = high;
+  }
+
+  // The state is an initialisation, not the result of a step, so the clock
+  // stays at zero. The residual is recorded at iteration 0 all the same: it is
+  // the starting point any convergence history will be measured against.
+  state.clock.reset();
+  state.history.clear();
+  state.history.record(0, state.residuals);
+
+  CFD_LOG_INFO(kLogCategory,
+               "flow initialised: U {:.4g} m/s at {:.2f} deg, Re {:.3g}, mu {:.3e} Pa.s, "
+               "continuity residual {:.3e}, max |div u| {:.3e} 1/s",
+               state.freestream.speed, state.freestream.angleOfAttackDeg,
+               state.freestream.reynoldsNumber, state.freestream.dynamicViscosity(chord),
+               state.residuals.continuity, flow::maxAbsDivergence(state.divergence));
+}
+
 void fitDomain(UiState& ui) {
   if (!ui.meshing.mesh.has_value()) {
     return;
@@ -639,6 +980,9 @@ void updateMesh(UiState& ui) {
   state.errorMessage.clear();
   state.lastGenerationMs = elapsed.count();
   state.mesh = std::move(generated).value();
+
+  // The flow lives on this mesh, so a new grid invalidates it.
+  ui.flow.dirty = true;
 
   const mesh::MeshQuality& quality = state.mesh->quality();
   CFD_LOG_INFO(kLogCategory,
@@ -1011,8 +1355,216 @@ void drawMeshPanel(UiState& ui) {
   }
 }
 
+void drawFlowPanel(UiState& ui) {
+  FlowState& state = ui.flow;
+
+  if (!ImGui::CollapsingHeader("Flow", ImGuiTreeNodeFlags_DefaultOpen)) {
+    return;
+  }
+
+  if (ImGui::Checkbox("Initialise flow", &state.enabled)) {
+    state.dirty = true;
+  }
+  if (!state.enabled) {
+    ImGui::TextColored(theme::kTextDisabled, "No flow state.");
+    return;
+  }
+  if (!ui.meshing.mesh.has_value()) {
+    ImGui::TextColored(theme::kLevelWarning, "A mesh is needed first.");
+    return;
+  }
+
+  // --- freestream ---
+  ImGui::Spacing();
+  ImGui::SeparatorText("Freestream");
+  if (beginInfoTable("flow_inputs", 104.0f)) {
+    const auto scalarRow = [&](const char* label, const char* id, double* value, float step,
+                               const char* fmt, double low, double high) {
+      ImGui::TableNextRow();
+      ImGui::TableSetColumnIndex(0);
+      ImGui::TextColored(theme::kTextDim, "%s", label);
+      ImGui::TableSetColumnIndex(1);
+      ImGui::SetNextItemWidth(-FLT_MIN);
+      if (ImGui::DragScalar(id, ImGuiDataType_Double, value, step, nullptr, nullptr, fmt)) {
+        *value = std::clamp(*value, low, high);
+        state.dirty = true;
+      }
+    };
+    scalarRow("Speed", "##speed", &state.freestream.speed, 0.25f, "%.4g m/s", 1e-3, 1e4);
+    scalarRow("Incidence", "##alpha", &state.freestream.angleOfAttackDeg, 0.05f, "%.2f deg",
+              -90.0, 90.0);
+    scalarRow("Density", "##rho", &state.freestream.density, 0.005f, "%.4g kg/m3", 1e-4, 1e4);
+    scalarRow("Reynolds", "##re", &state.freestream.reynoldsNumber, 5000.0f, "%.4g", 1.0,
+              1e9);
+    scalarRow("Pressure", "##pref", &state.freestream.referencePressure, 1.0f, "%.4g Pa",
+              -1e9, 1e9);
+    ImGui::EndTable();
+  }
+
+  if (!state.errorMessage.empty()) {
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::kLevelError);
+    ImGui::TextWrapped("%s", state.errorMessage.c_str());
+    ImGui::PopStyleColor();
+    return;
+  }
+
+  const double chord = ui.geometry.airfoil.has_value() ? ui.geometry.airfoil->chord() : 1.0;
+  const Vec2 streamVelocity = state.freestream.velocity();
+
+  ImGui::Spacing();
+  ImGui::SeparatorText("Derived");
+  ImGui::TextColored(theme::kTextDisabled, "Viscosity follows from the Reynolds number.");
+  if (beginInfoTable("flow_derived", 104.0f)) {
+    infoRow(ui, "Velocity", std::format("({:+.4g}, {:+.4g}) m/s", streamVelocity.x,
+                                        streamVelocity.y));
+    infoRow(ui, "Dyn. press", std::format("{:.5g} Pa", state.freestream.dynamicPressure()));
+    infoRow(ui, "Viscosity", std::format("{:.4e} Pa.s",
+                                         state.freestream.dynamicViscosity(chord)));
+    infoRow(ui, "Kinematic", std::format("{:.4e} m2/s",
+                                         state.freestream.kinematicViscosity(chord)));
+    ImGui::EndTable();
+  }
+
+  // --- boundary conditions ---
+  ImGui::Spacing();
+  ImGui::SeparatorText("Boundary conditions");
+
+  const auto kindCombo = [&](const char* label, const char* id, flow::BoundaryKind* kind,
+                             std::initializer_list<flow::BoundaryKind> choices) {
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::TextColored(theme::kTextDim, "%s", label);
+    ImGui::TableSetColumnIndex(1);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::BeginCombo(id, std::string{toString(*kind)}.c_str())) {
+      for (const flow::BoundaryKind option : choices) {
+        const bool selected = (*kind == option);
+        if (ImGui::Selectable(std::string{toString(option)}.c_str(), selected)) {
+          *kind = option;
+          state.dirty = true;
+        }
+        if (selected) {
+          ImGui::SetItemDefaultFocus();
+        }
+      }
+      ImGui::EndCombo();
+    }
+  };
+
+  if (beginInfoTable("flow_bc", 104.0f)) {
+    // The airfoil is not offered as a choice: anything but a wall would let
+    // fluid through the surface.
+    infoRow(ui, "Airfoil", toString(state.conditions.wall));
+    kindCombo("Far field", "##bcfar", &state.conditions.farField,
+              {flow::BoundaryKind::FarField, flow::BoundaryKind::Inlet});
+    kindCombo("Outlet", "##bcout", &state.conditions.outlet,
+              {flow::BoundaryKind::Outlet, flow::BoundaryKind::FarField});
+    infoRow(ui, "Wake cut", "Internal (not a boundary)");
+    ImGui::EndTable();
+  }
+
+  ImGui::Spacing();
+  ImGui::TextColored(theme::kTextDim, "Faces by condition");
+  if (beginInfoTable("flow_bc_counts", 104.0f)) {
+    const auto countRow = [&](const char* label, std::size_t count, const ImVec4& swatch) {
+      if (count == 0) {
+        return;
+      }
+      ImGui::TableNextRow();
+      ImGui::TableSetColumnIndex(0);
+      ImGui::TextColored(swatch, "%s", label);
+      ImGui::TableSetColumnIndex(1);
+      if (ui.fonts.mono != nullptr) {
+        ImGui::PushFont(ui.fonts.mono, 0.0f);
+      }
+      ImGui::Text("%zu", count);
+      if (ui.fonts.mono != nullptr) {
+        ImGui::PopFont();
+      }
+    };
+    countRow("No-slip wall", state.counts.wall, theme::kBcWall);
+    countRow("Inlet", state.counts.inlet, theme::kBcInlet);
+    countRow("Outlet", state.counts.outlet, theme::kBcOutlet);
+    countRow("Far field in", state.counts.farFieldIn, theme::kBcFarFieldIn);
+    countRow("Far field out", state.counts.farFieldOut, theme::kBcFarFieldOut);
+    countRow("Wake cut", state.counts.internalCut, theme::kBcInternal);
+    ImGui::EndTable();
+  }
+
+  // --- state ---
+  ImGui::Spacing();
+  ImGui::SeparatorText("State");
+  if (beginInfoTable("flow_state", 104.0f)) {
+    infoRow(ui, "Time", std::format("{:.5g} s", state.clock.time));
+    infoRow(ui, "Iteration", std::format("{}", state.clock.iteration));
+    infoRow(ui, "Continuity", std::format("{:.4e} m2/s", state.residuals.continuity));
+    infoRow(ui, "Max |div u|", std::format("{:.4e} 1/s",
+                                           flow::maxAbsDivergence(state.divergence)));
+    ImGui::EndTable();
+  }
+
+  // Stating this plainly matters more than anything else in the panel. The
+  // field is an initial guess that satisfies the far field everywhere and the
+  // wall nowhere; the divergence next to the surface is the measure of that,
+  // and removing it is exactly what a solver would do.
+  ImGui::Spacing();
+  ImGui::PushStyleColor(ImGuiCol_Text, theme::kLevelWarning);
+  ImGui::TextWrapped("Initialised field only. No equations have been solved, and the "
+                     "momentum residuals are zero because there is no momentum equation "
+                     "yet.");
+  ImGui::PopStyleColor();
+
+  // --- display ---
+  ImGui::Spacing();
+  ImGui::SeparatorText("Display");
+  ImGui::Checkbox("Field", &state.showField);
+  ImGui::SameLine();
+  ImGui::Checkbox("Conditions", &state.showBoundaryKinds);
+
+  ImGui::SetNextItemWidth(-FLT_MIN);
+  if (ImGui::BeginCombo("##fieldview", std::string{toString(state.view)}.c_str())) {
+    for (const FieldView option :
+         {FieldView::VelocityMagnitude, FieldView::VelocityX, FieldView::VelocityY,
+          FieldView::Pressure, FieldView::Divergence}) {
+      const bool selected = (state.view == option);
+      if (ImGui::Selectable(std::string{toString(option)}.c_str(), selected)) {
+        state.view = option;
+        state.dirty = true;  // the auto range depends on which field is shown
+      }
+      if (selected) {
+        ImGui::SetItemDefaultFocus();
+      }
+    }
+    ImGui::EndCombo();
+  }
+
+  if (ImGui::Checkbox("Auto range", &state.autoRange)) {
+    state.dirty = true;
+  }
+  if (!state.autoRange) {
+    if (beginInfoTable("flow_range", 104.0f)) {
+      ImGui::TableNextRow();
+      ImGui::TableSetColumnIndex(0);
+      ImGui::TextColored(theme::kTextDim, "Min");
+      ImGui::TableSetColumnIndex(1);
+      ImGui::SetNextItemWidth(-FLT_MIN);
+      ImGui::DragScalar("##rangemin", ImGuiDataType_Double, &state.rangeMin, 0.01f, nullptr,
+                        nullptr, "%.4g");
+
+      ImGui::TableNextRow();
+      ImGui::TableSetColumnIndex(0);
+      ImGui::TextColored(theme::kTextDim, "Max");
+      ImGui::TableSetColumnIndex(1);
+      ImGui::SetNextItemWidth(-FLT_MIN);
+      ImGui::DragScalar("##rangemax", ImGuiDataType_Double, &state.rangeMax, 0.01f, nullptr,
+                        nullptr, "%.4g");
+      ImGui::EndTable();
+    }
+  }
+}
+
 void drawSessionPanel(UiState& ui) {
-  if (ImGui::CollapsingHeader("Build", ImGuiTreeNodeFlags_DefaultOpen)) {
+  if (ImGui::CollapsingHeader("Build")) {
     if (beginInfoTable("build_info")) {
       infoRow(ui, "Version", BuildInfo::version());
       infoRow(ui, "Config", BuildInfo::buildType());
@@ -1022,7 +1574,7 @@ void drawSessionPanel(UiState& ui) {
     }
   }
 
-  if (ImGui::CollapsingHeader("Graphics", ImGuiTreeNodeFlags_DefaultOpen)) {
+  if (ImGui::CollapsingHeader("Graphics")) {
     if (beginInfoTable("gl_info")) {
       infoRow(ui, "Renderer", ui.renderer.renderer);
       infoRow(ui, "Vendor", ui.renderer.vendor);
@@ -1033,7 +1585,7 @@ void drawSessionPanel(UiState& ui) {
     }
   }
 
-  if (ImGui::CollapsingHeader("View", ImGuiTreeNodeFlags_DefaultOpen)) {
+  if (ImGui::CollapsingHeader("Viewport")) {
     const Vec2 centre = ui.camera.center();
     const auto [worldMin, worldMax] = ui.camera.visibleBounds();
 
@@ -1052,7 +1604,7 @@ void drawSessionPanel(UiState& ui) {
     }
   }
 
-  if (ImGui::CollapsingHeader("Pipeline", ImGuiTreeNodeFlags_DefaultOpen)) {
+  if (ImGui::CollapsingHeader("Pipeline")) {
     // The intended solver chain, shown so the structure of the project is
     // visible from inside it. Stages carry their real status: no progress
     // bars, no placeholder numbers for anything that does not exist.
@@ -1172,18 +1724,35 @@ void drawViewport(UiState& ui) {
 
   drawGridAndAxes(draw, ui, origin, size);
 
-  // Mesh first, section on top: the wall faces coincide with the outline, and
-  // the section should win that overlap.
+  // Painted back to front: shaded cells, then the grid over them, then the
+  // boundaries, then the section, which must win every overlap.
+  const bool haveFlow = ui.flow.enabled && ui.flow.field.has_value() &&
+                        ui.meshing.mesh.has_value();
+  if (haveFlow && ui.flow.showField) {
+    drawScalarField(draw, ui, origin);
+  }
+
   if (ui.meshing.mesh.has_value()) {
     if (ui.meshing.showInterior) {
       drawMeshLines(draw, ui, origin);
     }
-    if (ui.meshing.showBoundaries) {
+    // Boundary conditions supersede the plain mesh patch colouring once the
+    // flow exists, because the condition is the more informative thing.
+    if (haveFlow && ui.flow.showBoundaryKinds && ui.flow.faces.has_value()) {
+      drawBoundaryKinds(draw, ui, origin);
+    } else if (ui.meshing.showBoundaries) {
       drawMeshBoundaries(draw, ui, origin);
     }
   }
 
   drawAirfoil(draw, ui, origin);
+
+  if (haveFlow) {
+    if (ui.flow.showField) {
+      drawFieldLegend(draw, ui, origin, size);
+    }
+    drawFreestreamIndicator(draw, ui, origin, size);
+  }
 
   // Empty-state notice, shown only when there is genuinely nothing to draw.
   if (!ui.geometry.airfoil.has_value()) {

@@ -1,6 +1,8 @@
 #include "Theme.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cstddef>
 #include <filesystem>
 
 #include "cfd/core/Log.hpp"
@@ -37,6 +39,41 @@ const std::array<const char*, 9> kMonoFontCandidates{
     nullptr,
 };
 
+struct ColourStop {
+  float r;
+  float g;
+  float b;
+};
+
+/// Viridis, sampled at eleven stops and interpolated between.
+constexpr std::array<ColourStop, 11> kViridis{{
+    {0.267f, 0.005f, 0.329f}, {0.283f, 0.141f, 0.458f}, {0.254f, 0.265f, 0.530f},
+    {0.207f, 0.372f, 0.553f}, {0.164f, 0.471f, 0.558f}, {0.128f, 0.567f, 0.551f},
+    {0.135f, 0.659f, 0.518f}, {0.267f, 0.749f, 0.441f}, {0.478f, 0.821f, 0.318f},
+    {0.741f, 0.873f, 0.150f}, {0.993f, 0.906f, 0.144f},
+}};
+
+/// Cool-warm: saturated blue through a light neutral to saturated red.
+constexpr std::array<ColourStop, 5> kCoolWarm{{
+    {0.230f, 0.299f, 0.754f}, {0.553f, 0.610f, 0.863f}, {0.865f, 0.865f, 0.865f},
+    {0.882f, 0.529f, 0.451f}, {0.706f, 0.016f, 0.150f},
+}};
+
+template <std::size_t N>
+ImU32 sampleRamp(const std::array<ColourStop, N>& ramp, double t) {
+  const double clamped = std::clamp(t, 0.0, 1.0);
+  const double scaled = clamped * static_cast<double>(N - 1);
+  const auto low = static_cast<std::size_t>(scaled);
+  const std::size_t high = std::min(low + 1, N - 1);
+  const auto blend = static_cast<float>(scaled - static_cast<double>(low));
+
+  const ColourStop& a = ramp[low];
+  const ColourStop& b = ramp[high];
+  return ImGui::ColorConvertFloat4ToU32(ImVec4(a.r + (b.r - a.r) * blend,
+                                               a.g + (b.g - a.g) * blend,
+                                               a.b + (b.b - a.b) * blend, 1.0f));
+}
+
 ImFont* loadFirstAvailable(ImGuiIO& io, const std::array<const char*, 9>& candidates,
                            float sizePixels) {
   std::error_code ec;
@@ -57,6 +94,10 @@ ImFont* loadFirstAvailable(ImGuiIO& io, const std::array<const char*, 9>& candid
 }
 
 }  // namespace
+
+ImU32 sequentialColour(double t) { return sampleRamp(kViridis, t); }
+
+ImU32 divergingColour(double t) { return sampleRamp(kCoolWarm, t); }
 
 void apply(ImGuiStyle& style) {
   // --- geometry -----------------------------------------------------------

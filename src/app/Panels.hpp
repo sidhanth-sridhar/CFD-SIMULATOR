@@ -23,6 +23,9 @@
 #include "cfd/app/Camera2D.hpp"
 #include "cfd/core/Log.hpp"
 #include "cfd/geom/Airfoil.hpp"
+#include "cfd/flow/BoundaryConditions.hpp"
+#include "cfd/flow/FlowField.hpp"
+#include "cfd/flow/Freestream.hpp"
 #include "cfd/mesh/CGrid.hpp"
 #include "cfd/mesh/Mesh.hpp"
 
@@ -110,6 +113,67 @@ struct MeshState {
   }
 };
 
+/// Which scalar the viewport shades cells by.
+enum class FieldView {
+  VelocityMagnitude,
+  VelocityX,
+  VelocityY,
+  Pressure,
+  /// Net volume flux per unit area. Zero everywhere for an incompressible
+  /// solution, so any structure here is error - which makes it the most
+  /// informative thing to look at before a solver exists.
+  Divergence,
+};
+
+[[nodiscard]] std::string_view toString(FieldView view) noexcept;
+/// True where the sign of the quantity carries meaning, so it wants a
+/// diverging colour map centred on zero.
+[[nodiscard]] bool isSignedField(FieldView view) noexcept;
+
+/// Flow inputs, the initialised state, and how it is displayed.
+struct FlowState {
+  bool enabled{false};
+
+  flow::FreestreamConditions freestream;
+  flow::BoundaryConditions conditions;
+
+  std::optional<flow::FlowField> field;
+  std::optional<flow::FaceState> faces;
+  std::vector<double> divergence;
+  flow::ResidualSet residuals;
+  flow::TimeState clock;
+  flow::ResidualHistory history;
+
+  /// How many faces ended up carrying each condition. Counted once when the
+  /// conditions are applied rather than rescanned every frame.
+  struct BoundaryCounts {
+    std::size_t wall{0};
+    std::size_t inlet{0};
+    std::size_t outlet{0};
+    std::size_t farFieldIn{0};
+    std::size_t farFieldOut{0};
+    std::size_t internalCut{0};
+  };
+  BoundaryCounts counts;
+
+  std::string errorMessage;
+  bool dirty{true};
+
+  // --- display ---
+  bool showField{true};
+  bool showBoundaryKinds{true};
+  FieldView view{FieldView::VelocityMagnitude};
+  /// Auto-scale the colour map to the data. Turned off to compare two states
+  /// on the same scale.
+  bool autoRange{true};
+  double rangeMin{0.0};
+  double rangeMax{1.0};
+
+  /// Cells actually shaded last frame, and whether that was all of them.
+  std::size_t shadedCells{0};
+  bool shadingComplete{true};
+};
+
 /// Everything the UI reads or mutates during a frame.
 ///
 /// A single plain struct rather than a web of widget objects: with immediate
@@ -155,6 +219,7 @@ struct UiState {
 
   GeometryState geometry;
   MeshState meshing;
+  FlowState flow;
 
   theme::Fonts fonts;
   RendererInfo renderer;
@@ -169,6 +234,11 @@ void updateGeometry(UiState& ui);
 /// Regenerate the mesh if the geometry or any meshing input changed. Must run
 /// after updateGeometry, since the grid is built around the current section.
 void updateMesh(UiState& ui);
+
+/// Re-initialise the flow and re-apply the boundary conditions if anything
+/// they depend on changed. Must run after updateMesh: the field is sized by
+/// the mesh and the conditions are applied to its faces.
+void updateFlow(UiState& ui);
 
 /// Restore the default view: origin centred, unit chord comfortably framed.
 void resetView(UiState& ui);
@@ -185,6 +255,7 @@ void drawMenuBar(UiState& ui);
 void drawToolbar(UiState& ui);
 void drawGeometryPanel(UiState& ui);
 void drawMeshPanel(UiState& ui);
+void drawFlowPanel(UiState& ui);
 void drawSessionPanel(UiState& ui);
 void drawViewport(UiState& ui);
 void drawConsole(UiState& ui);

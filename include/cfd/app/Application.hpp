@@ -47,6 +47,13 @@ struct ApplicationOptions {
   /// "coarse", "medium" or "fine". Empty leaves meshing switched off.
   std::string initialMeshResolution{};
 
+  /// Initialise the flow at startup. Requires a mesh, so it implies --mesh.
+  bool initialiseFlow{false};
+
+  /// Scalar shown in the viewport: "velocity", "vx", "vy", "pressure" or
+  /// "divergence". Empty keeps the default.
+  std::string initialFieldView{};
+
   /// Section to load at startup, e.g. "NACA 2412". Empty keeps the default.
   /// The string is placed in the geometry panel's input, so it is validated
   /// and reported through the same path as anything typed by hand.

@@ -288,6 +288,7 @@ void Application::Impl::layoutAndDrawPanels() {
     if (beginPanel("##session", ImVec2(regionX, regionY), ImVec2(leftWidth, regionH))) {
       drawGeometryPanel(ui);
       drawMeshPanel(ui);
+      drawFlowPanel(ui);
       drawSessionPanel(ui);
     }
     ImGui::End();
@@ -341,8 +342,10 @@ void Application::Impl::drawFrame() {
   // Regenerate before anything is drawn, so the viewport and the measured
   // readout in the panel can never disagree within a frame.
   updateGeometry(ui);
-  // Strictly after the geometry: the grid is built around the current section.
+  // Strictly ordered: the grid is built around the current section, and the
+  // flow is sized by the grid.
   updateMesh(ui);
+  updateFlow(ui);
 
   // Drain any trackpad pinch once per frame; the viewport applies and clears it.
   ui.pinchMagnification += platform::consumePinchMagnification();
@@ -413,6 +416,39 @@ Status Application::initialize(const ApplicationOptions& options) {
     // A mesh asked for on the command line is the thing to look at, so open
     // on the whole domain rather than on the section.
     impl_->ui.meshing.pendingDomainFit = true;
+  }
+
+  if (options.initialiseFlow) {
+    // A flow needs somewhere to live, so bring the mesh up with it if the
+    // caller did not ask for one explicitly.
+    // Bring the mesh up too, but leave the view framed on the section: the
+    // interesting part of an initialised field is what happens at the wall,
+    // and only --mesh on its own means "show me the domain".
+    if (!impl_->ui.meshing.enabled) {
+      impl_->ui.meshing.enabled = true;
+      impl_->ui.meshing.dirty = true;
+    }
+    impl_->ui.flow.enabled = true;
+    impl_->ui.flow.dirty = true;
+  }
+
+  if (!options.initialFieldView.empty()) {
+    std::string view = options.initialFieldView;
+    std::transform(view.begin(), view.end(), view.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    if (view == "vx") {
+      impl_->ui.flow.view = FieldView::VelocityX;
+    } else if (view == "vy") {
+      impl_->ui.flow.view = FieldView::VelocityY;
+    } else if (view == "pressure") {
+      impl_->ui.flow.view = FieldView::Pressure;
+    } else if (view == "divergence") {
+      impl_->ui.flow.view = FieldView::Divergence;
+    } else {
+      impl_->ui.flow.view = FieldView::VelocityMagnitude;
+    }
+    impl_->ui.flow.dirty = true;
   }
 
   impl_->screenshotPath = options.screenshotPath;

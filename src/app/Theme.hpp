@@ -75,6 +75,41 @@ inline const ImVec4 kBoundaryFarfield{0.427f, 0.588f, 0.749f, 1.00f};
 inline const ImVec4 kBoundaryOutlet{0.475f, 0.702f, 0.573f, 1.00f};
 inline const ImVec4 kBoundaryWakeCut{0.831f, 0.651f, 0.400f, 1.00f};
 
+// Boundary conditions, as distinct from the mesh patches they sit on. The
+// far field is split by whether the stream is entering or leaving, because
+// that is the part a user cannot work out by looking at the geometry.
+inline const ImVec4 kBcWall{0.847f, 0.847f, 0.878f, 1.00f};
+inline const ImVec4 kBcInlet{0.400f, 0.706f, 0.902f, 1.00f};
+inline const ImVec4 kBcOutlet{0.475f, 0.702f, 0.573f, 1.00f};
+inline const ImVec4 kBcFarFieldIn{0.427f, 0.588f, 0.749f, 1.00f};
+inline const ImVec4 kBcFarFieldOut{0.545f, 0.667f, 0.639f, 1.00f};
+inline const ImVec4 kBcInternal{0.831f, 0.651f, 0.400f, 1.00f};
+
+// ---------------------------------------------------------------------------
+// Scalar field colour maps
+// ---------------------------------------------------------------------------
+//
+// Two maps, chosen for what the data means rather than for looks.
+//
+//   sequentialColour  - viridis. Perceptually uniform: equal steps in value
+//                       look like equal steps in colour, and it stays readable
+//                       in greyscale and to colour-blind viewers. Use for
+//                       quantities with a natural zero at one end, such as
+//                       speed or pressure magnitude.
+//
+//   divergingColour   - blue to grey to red. Use where the *sign* carries
+//                       meaning, such as a velocity component or a divergence,
+//                       so that zero sits at the neutral midpoint and cannot
+//                       be confused with a small positive value.
+//
+// A rainbow map is deliberately avoided: it invents boundaries where the data
+// has none, which in a flow field reads as structure that is not there.
+
+/// t in [0, 1]; values outside are clamped.
+[[nodiscard]] ImU32 sequentialColour(double t);
+/// t in [0, 1] with 0.5 the neutral midpoint; values outside are clamped.
+[[nodiscard]] ImU32 divergingColour(double t);
+
 /// Fixed metrics, in unscaled pixels. DPI scaling is applied by ImGui.
 inline constexpr float kToolbarHeight = 30.0f;
 inline constexpr float kStatusBarHeight = 24.0f;
