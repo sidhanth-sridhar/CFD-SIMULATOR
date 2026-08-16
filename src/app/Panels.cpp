@@ -1112,6 +1112,17 @@ bool updateSolver(UiState& ui) {
     state.momentumHistory.push_back(
         asLog(std::max(state.monitor.residuals.momentumX, state.monitor.residuals.momentumY)));
 
+    // A periodic mark in the log. A long run is otherwise silent until it
+    // finishes, and the useful question during one is not what the residual is
+    // now but whether it is still falling.
+    constexpr long long kProgressEvery = 500;
+    if (state.iteration % kProgressEvery == 0) {
+      CFD_LOG_INFO(kLogCategory,
+                   "iteration {}: continuity {:.3e}, momentum {:.3e} / {:.3e}",
+                   state.iteration, state.monitor.residuals.continuity,
+                   state.monitor.residuals.momentumX, state.monitor.residuals.momentumY);
+    }
+
     if (!std::isfinite(state.monitor.residuals.continuity) ||
         !std::isfinite(state.monitor.residuals.momentumX)) {
       state.errorMessage =
