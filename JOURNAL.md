@@ -2151,7 +2151,7 @@ explicit instruction.
 # Phase 5 — Viscous Flow Around an Aerofoil
 
 **Completed:** 2026-08-15
-**Outcome:** 207/207 tests pass. Surface pressure, C<sub>p</sub>, wall shear,
+**Outcome:** 208/208 tests pass. Surface pressure, C<sub>p</sub>, wall shear,
 C<sub>f</sub> and near-wall velocity extracted from the solution; separation
 detected from the sign of the computed wall shear and confirmed to move forward
 with incidence (x/c = 0.69 at 8°, 0.39 at 12°, attached below 8°).
@@ -2187,7 +2187,9 @@ detected from the flow, never hard-coded**.
 - Viewport rendering: the section coloured by wall shear, separation ringed and
   labelled, the stagnation point marked, streamlines drawn under the section.
 - `--alpha` and `--screenshot-frames` on the command line.
-- 17 new tests.
+- An incidence slider that continues the solve from the field already on
+  screen rather than restarting it.
+- 18 new tests.
 
 ## 3. The physics, term by term
 
@@ -2310,6 +2312,46 @@ about mesh connectivity, not about any one algorithm, so it now lives in
 `cfd::mesh` and the solver has a `using` declaration for it. Three callers
 sharing one definition beats three copies drifting apart.
 
+### An incidence slider, and why it forced a change to the solver loop
+
+Angle of attack is the one freestream quantity that gets *swept*, so it gets a
+slider rather than a value box. Rotating the stream re-classifies every
+far-field face as inflow or outflow, rebuilds the boundary conditions, and feeds
+through to Cp, Cf, separation and the streamlines — all of which the existing
+dirty-flag chain already handled.
+
+What it did not handle was the cost. Every nudge marked the flow dirty, which
+rebuilt the field **from the undisturbed stream** and reset the solver to
+iteration zero. A slider that discards a thousand converged iterations per pixel
+of travel is a slider in name only.
+
+The fix is continuation: carry the solved velocity and pressure into the rebuilt
+field and only take density and viscosity from the new freestream. This is
+legitimate because **a converged steady solution does not depend on what it was
+started from** — nothing in the steady equations remembers the guess. It is also
+enormously cheaper: the answer at 8° is a far better starting point for 9° than
+a uniform flow.
+
+"Should be independent of the initial guess" is exactly the kind of claim worth
+pinning down, though, because if it were false the slider would quietly produce
+history-dependent results that still looked plausible. So there is now a test
+that solves 12° cold and solves it again from a converged 6° field, and requires
+the two to agree station for station.
+
+Two consequences had to be handled honestly:
+
+- **Reset stopped meaning reset.** It rebuilt the solver from `ui.flow.field`,
+  which after a continuation is a solved field, not a uniform one. It now
+  rebuilds the *flow* with continuation switched off.
+- **An iteration count became ambiguous.** 200 iterations from a neighbouring
+  solution is not the same achievement as 200 from scratch, so the Solve panel
+  marks a continued run as such.
+
+A converged run also resumes itself when the slider moves. That is a deliberate
+choice rather than an oversight: the alternative leaves an unsolved field on
+screen after every nudge until the user remembers to press Run, which answers
+the wrong question. A run paused on purpose stays paused.
+
 ### Scaling the C<sub>f</sub> plot from x/c = 0.05
 
 Skin friction behaves like $1/\sqrt{x}$ near the leading edge — the boundary
@@ -2344,6 +2386,11 @@ profile flags every station.
 The α = 0 tolerance is 10⁻³ rather than machine precision on purpose: the
 Gauss-Seidel sweeps run in index order, which is not a symmetric operation, so
 the converged field is symmetric to the solver's tolerance and not beyond it.
+
+**Against itself**, to justify the slider's continuation: solving 12° from the
+undisturbed stream and solving it from a converged 6° field agree on every
+station's Cp and Cf to 5×10⁻³, and on the separation and stagnation stations to
+0.02 c. The starting field leaves nothing behind.
 
 **Sweeping incidence** on the coarse C-grid at Re = 500 is the check that
 matters most, because it tests a *trend* rather than a single number:
@@ -2444,7 +2491,7 @@ minutes went into suspecting the option plumbing, which was innocent.
 
 **Verified by running it**
 
-- 207/207 tests pass. Zero warnings with `-DCFD_WARNINGS_AS_ERRORS=ON`.
+- 208/208 tests pass. Zero warnings with `-DCFD_WARNINGS_AS_ERRORS=ON`.
 - NACA 0012 at Re = 500: α = 4° converges in 1,837 iterations, α = 8° in 1,208,
   α = 12° in 1,131, all to a continuity residual below 10⁻⁶.
 - The boundary layer thickens along the chord, the wake persists downstream, the

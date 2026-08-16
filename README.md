@@ -155,10 +155,40 @@ the boundary conditions are applied to every face.
 | Input | Meaning |
 |---|---|
 | Speed | Freestream velocity magnitude, m/s |
-| Incidence | Angle of attack in degrees; positive pitches the nose up |
+| Incidence | Angle of attack in degrees, on a slider spanning ±20°; positive pitches the nose up |
 | Density | kg/m³, constant (the flow is treated as incompressible) |
 | Reynolds | ρUc/μ — the viscosity is *derived* from this, not set directly |
 | Pressure | Reference static pressure, Pa (gauge) |
+
+**Sweeping incidence.** Angle of attack gets a slider rather than a value box,
+because it is the one freestream quantity that is swept: an aerofoil is
+interesting precisely for how it behaves as the angle changes. The slider spans
+±20°, marked at zero, with a button beside it to return there; ctrl-click takes
+a typed value.
+
+Changing it rotates the freestream vector, which re-classifies every far-field
+face as inflow or outflow, rebuilds the boundary conditions, and feeds through
+to the surface pressures, skin friction, separation station and streamlines.
+The geometry and the mesh do not move — the section stays put and the stream
+arrives at an angle, which is the correct way round: rotating the mesh would
+change the discretisation as well as the physics.
+
+Two behaviours make the slider usable rather than merely present:
+
+- **It continues from the field already solved** instead of restarting from the
+  undisturbed stream. A converged steady solution does not depend on what it
+  was started from, so the answer at 8° is a far better guess for 9° than a
+  uniform flow is — and it costs a few hundred iterations instead of a few
+  thousand. A regression test pins this down: solving 12° cold and solving it
+  from a converged 6° field agree station for station.
+- **A converged run resumes itself.** If the solve had finished and you move the
+  slider, it starts iterating again towards the new answer. A run you paused
+  deliberately stays paused, and **Reset** always returns to the undisturbed
+  stream rather than to whatever was carried over.
+
+The Solve panel marks a continued run as such next to the iteration count, so a
+case that converged in 200 iterations from a neighbouring solution is not
+mistaken for one that converged in 200 from scratch.
 
 The Reynolds number is an input rather than an output because it is the one
 dimensionless group that decides the character of the flow: two flows at the
@@ -395,6 +425,7 @@ or by physics:
 |---|---|---|
 | NACA 0012, α = 0° | Upper and lower distributions are mirror images; nothing separates | matched to 10⁻³; zero reversed stations |
 | NACA 0012, α = 10° | Stagnation moves aft along the lower surface; the suction side separates and the pressure side does not | stagnation at x/c = 0.005, separation on the upper surface only |
+| NACA 0012, α = 12° cold vs. continued from 6° | The converged solution does not depend on the starting field | Cp and Cf agree to 5×10⁻³ per station; separation and stagnation to 0.02 c |
 
 Run at Re = 500 on the coarse C-grid, separation moves forward as incidence
 increases, which is the behaviour that matters:

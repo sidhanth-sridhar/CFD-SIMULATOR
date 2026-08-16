@@ -985,6 +985,20 @@ void updateFlow(UiState& ui) {
     return;
   }
 
+  // Continue from the field already on screen where that was asked for. The
+  // uniform field is still built first, because it is what sets density and
+  // viscosity from the new freestream - only the two solved quantities are
+  // carried across. A mesh change alters the cell count, so the size check is
+  // also what stops a stale field being copied onto a different grid.
+  const bool continued = state.warmStart && state.field.has_value() &&
+                         state.field->size() == field.value().size();
+  if (continued) {
+    field.value().velocity = state.field->velocity;
+    field.value().pressure = state.field->pressure;
+  }
+  state.warmStart = false;
+  state.continuedFromPrevious = continued;
+
   Result<flow::FaceState> faces =
       flow::evaluateFaces(grid, field.value(), state.conditions, state.freestream);
   if (!faces) {
@@ -1035,14 +1049,25 @@ void updateFlow(UiState& ui) {
   state.history.clear();
   state.history.record(0, state.residuals);
 
+  // A converged run that is continued into a new freestream picks itself back
+  // up. Sweeping incidence is the whole reason the slider exists, and a sweep
+  // that leaves an unsolved field on screen after every nudge - until the user
+  // remembers to press Run - answers the wrong question. A run the user paused
+  // on purpose stays paused.
+  const bool resume = continued && ui.solving.converged;
+
   // The solver is built from this field, so it has to start again, and the
   // surface quantities are read from it, so they have to be taken again.
   ui.solving.dirty = true;
   ui.surface.dirty = true;
+  if (resume) {
+    ui.solving.running = true;
+  }
 
   CFD_LOG_INFO(kLogCategory,
-               "flow initialised: U {:.4g} m/s at {:.2f} deg, Re {:.3g}, mu {:.3e} Pa.s, "
+               "flow {}: U {:.4g} m/s at {:.2f} deg, Re {:.3g}, mu {:.3e} Pa.s, "
                "continuity residual {:.3e}, max |div u| {:.3e} 1/s",
+               continued ? "continued from the previous solution" : "initialised",
                state.freestream.speed, state.freestream.angleOfAttackDeg,
                state.freestream.reynoldsNumber, state.freestream.dynamicViscosity(chord),
                state.residuals.continuity, flow::maxAbsDivergence(state.divergence));
@@ -1680,6 +1705,10 @@ void drawMeshPanel(UiState& ui) {
   }
 }
 
+/// Span of the incidence slider, in degrees.
+constexpr double kIncidenceSliderMin = -20.0;
+constexpr double kIncidenceSliderMax = 20.0;
+
 void drawFlowPanel(UiState& ui) {
   FlowState& state = ui.flow;
 
@@ -1712,12 +1741,70 @@ void drawFlowPanel(UiState& ui) {
       ImGui::SetNextItemWidth(-FLT_MIN);
       if (ImGui::DragScalar(id, ImGuiDataType_Double, value, step, nullptr, nullptr, fmt)) {
         *value = std::clamp(*value, low, high);
+        // Only the stream changed, not the domain it flows through, so the
+        // field already on screen is a far better starting point than a
+        // uniform one.
+        state.warmStart = true;
         state.dirty = true;
       }
     };
     scalarRow("Speed", "##speed", &state.freestream.speed, 0.25f, "%.4g m/s", 1e-3, 1e4);
-    scalarRow("Incidence", "##alpha", &state.freestream.angleOfAttackDeg, 0.05f, "%.2f deg",
-              -90.0, 90.0);
+
+    // Incidence gets a slider rather than a drag box, because it is the one
+    // freestream quantity that is *swept*: the whole point of an aerofoil is
+    // how it behaves as the angle changes, so the control should invite being
+    // moved across a range and show where in that range it currently sits.
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::TextColored(theme::kTextDim, "Incidence");
+    ImGui::TableSetColumnIndex(1);
+    {
+      // Room for the zero button on the same line.
+      const float buttonWidth = ImGui::GetFrameHeight();
+      ImGui::SetNextItemWidth(std::max(
+          ImGui::GetContentRegionAvail().x - buttonWidth - ImGui::GetStyle().ItemSpacing.x,
+          40.0f));
+      // Bounded at +/-20 deg: beyond that a steady 2D solution stops meaning
+      // anything, and a slider that spans a range the solver cannot answer for
+      // is a slider that mostly points at nonsense. Ctrl-click still takes a
+      // typed value, which is clamped to +/-90 below.
+      if (ImGui::SliderScalar("##alpha", ImGuiDataType_Double,
+                              &state.freestream.angleOfAttackDeg, &kIncidenceSliderMin,
+                              &kIncidenceSliderMax, "%.2f deg")) {
+        state.freestream.angleOfAttackDeg =
+            std::clamp(state.freestream.angleOfAttackDeg, -90.0, 90.0);
+        state.warmStart = true;
+        state.dirty = true;
+      }
+
+      // A tick at zero. Without it the control reads as another value box, and
+      // there is nothing to tell at a glance which side of level the section
+      // is at - which is the first thing you want to know from it.
+      const ImVec2 low = ImGui::GetItemRectMin();
+      const ImVec2 high = ImGui::GetItemRectMax();
+      const float zeroX = low.x + (high.x - low.x) *
+                                      static_cast<float>(-kIncidenceSliderMin /
+                                                         (kIncidenceSliderMax -
+                                                          kIncidenceSliderMin));
+      ImGui::GetWindowDrawList()->AddLine(ImVec2(zeroX, high.y - 4.0f),
+                                          ImVec2(zeroX, high.y - 1.0f),
+                                          ImGui::GetColorU32(theme::kTextDim), 1.0f);
+      ImGui::GetWindowDrawList()->AddLine(ImVec2(zeroX, low.y + 1.0f),
+                                          ImVec2(zeroX, low.y + 4.0f),
+                                          ImGui::GetColorU32(theme::kTextDim), 1.0f);
+
+      ImGui::SameLine();
+      if (ImGui::Button("0", ImVec2(buttonWidth, 0.0f)) &&
+          state.freestream.angleOfAttackDeg != 0.0) {
+        state.freestream.angleOfAttackDeg = 0.0;
+        state.warmStart = true;
+        state.dirty = true;
+      }
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Back to zero incidence");
+      }
+    }
+
     scalarRow("Density", "##rho", &state.freestream.density, 0.005f, "%.4g kg/m3", 1e-4, 1e4);
     scalarRow("Reynolds", "##re", &state.freestream.reynoldsNumber, 5000.0f, "%.4g", 1.0,
               1e9);
@@ -1725,6 +1812,11 @@ void drawFlowPanel(UiState& ui) {
               -1e9, 1e9);
     ImGui::EndTable();
   }
+  ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDisabled);
+  ImGui::TextWrapped("Drag the incidence slider to sweep; ctrl-click to type. A change "
+                     "continues from the field already solved rather than starting cold, "
+                     "and a converged run picks itself back up.");
+  ImGui::PopStyleColor();
 
   if (!state.errorMessage.empty()) {
     ImGui::PushStyleColor(ImGuiCol_Text, theme::kLevelError);
@@ -1919,7 +2011,12 @@ void drawSolverPanel(UiState& ui) {
   ImGui::SameLine();
   if (ImGui::Button("Reset", ImVec2(buttonWidth, 0.0f))) {
     state.running = false;
-    state.dirty = true;  // rebuild from the initialised field
+    // Back to the undisturbed stream, not to whatever the field happened to
+    // hold. Rebuilding the flow rather than only the solver is what makes that
+    // true: a run continued across an incidence change leaves a solved field
+    // in place, and resetting onto it would not be a reset.
+    ui.flow.warmStart = false;
+    ui.flow.dirty = true;
   }
 
   if (!state.errorMessage.empty()) {
@@ -1945,7 +2042,9 @@ void drawSolverPanel(UiState& ui) {
   ImGui::Spacing();
   ImGui::SeparatorText("Residuals");
   if (beginInfoTable("solver_residuals", 104.0f)) {
-    infoRow(ui, "Iteration", std::format("{}", state.iteration));
+    infoRow(ui, "Iteration",
+            std::format("{}{}", state.iteration,
+                        ui.flow.continuedFromPrevious ? "  (continued)" : ""));
     infoRow(ui, "Continuity", std::format("{:.4e}", state.monitor.residuals.continuity));
     infoRow(ui, "Momentum x", std::format("{:.4e}", state.monitor.residuals.momentumX));
     infoRow(ui, "Momentum y", std::format("{:.4e}", state.monitor.residuals.momentumY));

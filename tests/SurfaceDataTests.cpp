@@ -274,10 +274,11 @@ const Mesh& solveMesh() {
   return mesh;
 }
 
-/// Solve the section at the given incidence and extract its surface.
-SurfaceDistribution solved(double alpha, int iterations) {
+/// Solve the section at the given incidence, starting from `start` if given and
+/// from the undisturbed stream otherwise. Returns the solved field.
+FlowField solveField(double alpha, int iterations, const FlowField* start) {
   const Mesh& mesh = solveMesh();
-  FreestreamConditions conditions = stream(alpha);
+  const FreestreamConditions conditions = stream(alpha);
 
   auto faceConditions =
       cfd::flow::buildFaceConditions(mesh, cfd::flow::BoundaryConditions{}, conditions);
@@ -286,8 +287,17 @@ SurfaceDistribution solved(double alpha, int iterations) {
   auto created = cfd::solver::SimpleSolver::create(mesh, faceConditions.value(),
                                                    cfd::solver::SimpleSettings{});
   EXPECT_TRUE(created);
+
   auto initial = FlowField::uniform(mesh.cellCount(), conditions, 1.0);
   EXPECT_TRUE(initial);
+  if (start != nullptr) {
+    // Carry the solved quantities over, exactly as the application does when
+    // the freestream changes: density and viscosity still come from the new
+    // conditions, only velocity and pressure are inherited.
+    EXPECT_EQ(start->size(), initial.value().size());
+    initial.value().velocity = start->velocity;
+    initial.value().pressure = start->pressure;
+  }
   EXPECT_TRUE(created.value().initialise(initial.value()));
 
   for (int i = 0; i < iterations; ++i) {
@@ -297,8 +307,13 @@ SurfaceDistribution solved(double alpha, int iterations) {
       break;
     }
   }
+  return created.value().field();
+}
 
-  auto result = extractSurface(mesh, created.value().field(), conditions, 1.0);
+/// Solve the section at the given incidence and extract its surface.
+SurfaceDistribution solved(double alpha, int iterations) {
+  const FlowField field = solveField(alpha, iterations, nullptr);
+  auto result = extractSurface(solveMesh(), field, stream(alpha), 1.0);
   EXPECT_TRUE(result) << (result.hasError() ? result.error().format() : "");
   return std::move(result).value();
 }
@@ -358,6 +373,55 @@ TEST(SurfaceData, IncidenceMovesTheStagnationPointAndSeparatesTheSuctionSide) {
   // Suction: the upper surface reaches a lower minimum pressure than at zero
   // incidence, which is where lift comes from.
   EXPECT_LT(pitched.minPressureCoefficient, level.minPressureCoefficient);
+}
+
+// Sweeping incidence in the application continues from the field already on
+// screen rather than starting cold, which is the only thing that makes a slider
+// usable: a nudge would otherwise throw away every iteration so far.
+//
+// That is only legitimate if the steady solution is independent of what it was
+// started from. It should be - nothing in a converged steady answer remembers
+// the guess - but "should be" is exactly the kind of claim worth pinning down,
+// because if it were false the slider would quietly produce history-dependent
+// results that still looked plausible.
+TEST(SurfaceData, ContinuingFromANeighbouringIncidenceReachesTheSameSolution) {
+  const Mesh& mesh = solveMesh();
+
+  // Cold: straight to 12 degrees from the undisturbed stream.
+  const FlowField cold = solveField(12.0, 900, nullptr);
+
+  // Continued: 6 degrees first, then carry that field into the 12 degree case
+  // and give it the same number of iterations again.
+  const FlowField intermediate = solveField(6.0, 900, nullptr);
+  const FlowField continued = solveField(12.0, 900, &intermediate);
+
+  auto coldSurface = extractSurface(mesh, cold, stream(12.0), 1.0);
+  auto continuedSurface = extractSurface(mesh, continued, stream(12.0), 1.0);
+  ASSERT_TRUE(coldSurface);
+  ASSERT_TRUE(continuedSurface);
+  ASSERT_EQ(coldSurface.value().upper.size(), continuedSurface.value().upper.size());
+
+  // Both routes must arrive at the same surface loading. The tolerance is set
+  // by how far either is from full convergence at 900 iterations, not by any
+  // difference the starting field is expected to leave behind.
+  for (std::size_t i = 0; i < coldSurface.value().upper.size(); ++i) {
+    EXPECT_NEAR(coldSurface.value().upper[i].pressureCoefficient,
+                continuedSurface.value().upper[i].pressureCoefficient, 5e-3)
+        << "upper Cp differs at station " << i;
+    EXPECT_NEAR(coldSurface.value().upper[i].skinFriction,
+                continuedSurface.value().upper[i].skinFriction, 5e-3)
+        << "upper Cf differs at station " << i;
+  }
+
+  // And they must agree on the thing the surface panel actually reports.
+  EXPECT_EQ(coldSurface.value().upperSeparation.found,
+            continuedSurface.value().upperSeparation.found);
+  if (coldSurface.value().upperSeparation.found) {
+    EXPECT_NEAR(coldSurface.value().upperSeparation.chordFraction,
+                continuedSurface.value().upperSeparation.chordFraction, 0.02);
+  }
+  EXPECT_NEAR(coldSurface.value().stagnationChordFraction,
+              continuedSurface.value().stagnationChordFraction, 0.02);
 }
 
 

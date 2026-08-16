@@ -162,6 +162,24 @@ struct FlowState {
   std::string errorMessage;
   bool dirty{true};
 
+  /// Carry the current velocity and pressure into the rebuilt field instead of
+  /// starting again from the undisturbed stream.
+  ///
+  /// Set when only the freestream changed. The steady solution does not depend
+  /// on what it was started from, so continuing from the answer at 8 degrees is
+  /// as valid a route to the answer at 9 as starting cold - and enormously
+  /// cheaper, which is what makes sweeping incidence with a slider usable at
+  /// all rather than a way to discard a thousand iterations per nudge.
+  ///
+  /// Cleared by the flow rebuild, so it has to be set again for each change.
+  bool warmStart{false};
+
+  /// Whether the field currently on screen was carried over rather than
+  /// started cold. Reported next to the iteration count, so that a case that
+  /// converged in 200 iterations from a neighbouring solution is not mistaken
+  /// for one that converged in 200 iterations from scratch.
+  bool continuedFromPrevious{false};
+
   // --- display ---
   bool showField{true};
   bool showBoundaryKinds{true};
