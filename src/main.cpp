@@ -33,11 +33,14 @@ struct Options {
   bool showVersion{false};
   bool selfCheck{false};
   std::string screenshotPath;
+  int screenshotFrames{0};
   std::string section;
   std::string meshResolution;
   bool initialiseFlow{false};
   bool startSolver{false};
   double reynoldsNumber{0.0};
+  double angleOfAttackDeg{0.0};
+  bool angleGiven{false};
   std::string fieldView;
 };
 
@@ -59,11 +62,15 @@ void printUsage() {
       "      --flow              Initialise the flow at startup (implies --mesh)\n"
       "      --solve             Start the solver running (implies --flow)\n"
       "      --reynolds N        Reynolds number based on the chord\n"
+      "      --alpha DEG         Angle of attack in degrees\n"
       "      --field NAME        Shown scalar: velocity, vx, vy, pressure\n"
       "                          or divergence\n"
       "      --self-check        Run headless startup checks and exit\n"
       "      --screenshot FILE   Render a few frames, save the window to FILE\n"
       "                          as a BMP, then exit\n"
+      "      --screenshot-frames N\n"
+      "                          Frames to render first (default 3). Use a large\n"
+      "                          value with --solve to capture a converged run\n"
       "\n"
       "With no options the graphical application starts.\n",
       cfd::BuildInfo::projectName().data(), cfd::BuildInfo::version().data(),
@@ -106,6 +113,19 @@ cfd::Result<Options> parseArguments(std::span<const std::string_view> args) {
         return cfd::Error{cfd::ErrorCode::InvalidArgument,
                           "--reynolds must be a positive number"};
       }
+    } else if (arg == "--alpha") {
+      if (i + 1 >= args.size()) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument, "--alpha requires a value in degrees"};
+      }
+      ++i;
+      const std::string text{args[i]};
+      char* end = nullptr;
+      options.angleOfAttackDeg = std::strtod(text.c_str(), &end);
+      if (end == text.c_str() || *end != '\0') {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          "--alpha must be a number of degrees"};
+      }
+      options.angleGiven = true;
     } else if (arg == "--solve") {
       options.startSolver = true;
     } else if (arg == "--flow") {
@@ -124,6 +144,17 @@ cfd::Result<Options> parseArguments(std::span<const std::string_view> args) {
       }
       ++i;
       options.screenshotPath = std::string{args[i]};
+    } else if (arg == "--screenshot-frames") {
+      if (i + 1 >= args.size()) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          "--screenshot-frames requires a count"};
+      }
+      ++i;
+      options.screenshotFrames = std::atoi(std::string{args[i]}.c_str());
+      if (options.screenshotFrames < 1) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          "--screenshot-frames must be at least 1"};
+      }
     } else if (arg == "--log-level") {
       if (i + 1 >= args.size()) {
         return cfd::Error{cfd::ErrorCode::InvalidArgument,
@@ -235,12 +266,17 @@ int main(int argc, char** argv) {
     cfd::app::ApplicationOptions appOptions;
     appOptions.logBuffer = guiLog;
     appOptions.screenshotPath = options.screenshotPath;
+    if (options.screenshotFrames > 0) {
+      appOptions.screenshotAfterFrames = options.screenshotFrames;
+    }
     appOptions.initialSection = options.section;
     appOptions.initialMeshResolution = options.meshResolution;
     appOptions.initialiseFlow = options.initialiseFlow;
     appOptions.initialFieldView = options.fieldView;
     appOptions.startSolver = options.startSolver;
     appOptions.reynoldsNumber = options.reynoldsNumber;
+    appOptions.angleOfAttackDeg = options.angleOfAttackDeg;
+    appOptions.angleGiven = options.angleGiven;
 
     cfd::app::Application application;
     if (const cfd::Status status = application.initialize(appOptions); !status) {

@@ -28,6 +28,8 @@
 #include "cfd/flow/Freestream.hpp"
 #include "cfd/mesh/CGrid.hpp"
 #include "cfd/mesh/Mesh.hpp"
+#include "cfd/post/Streamlines.hpp"
+#include "cfd/post/SurfaceData.hpp"
 #include "cfd/solver/SimpleSolver.hpp"
 
 namespace cfd::app {
@@ -206,6 +208,37 @@ struct SolverState {
   bool dirty{true};
 };
 
+/// Surface distributions, streamlines, and how they are shown.
+struct SurfaceState {
+  bool showWallShear{true};
+  bool showSeparation{true};
+  bool showStreamlines{false};
+  bool showSurfacePlots{true};
+
+  std::optional<post::SurfaceDistribution> distribution;
+  std::vector<post::Streamline> streamlines;
+
+  /// Plot-ready copies, built once when the distribution changes rather than
+  /// rebuilt every frame.
+  std::vector<float> upperX;
+  std::vector<float> upperCp;
+  std::vector<float> upperCf;
+  std::vector<float> lowerX;
+  std::vector<float> lowerCp;
+  std::vector<float> lowerCf;
+
+  int streamlineSeeds{22};
+  std::string errorMessage;
+  bool dirty{true};
+
+  /// Last separation locations written to the log, or -1 for "none". The
+  /// surface is re-extracted every frame the solver advances, so without this
+  /// the console would fill with one identical line per frame; a moving
+  /// separation point is news, a stationary one is not.
+  double reportedUpperSeparation{-1.0};
+  double reportedLowerSeparation{-1.0};
+};
+
 /// Everything the UI reads or mutates during a frame.
 ///
 /// A single plain struct rather than a web of widget objects: with immediate
@@ -253,6 +286,7 @@ struct UiState {
   MeshState meshing;
   FlowState flow;
   SolverState solving;
+  SurfaceState surface;
 
   theme::Fonts fonts;
   RendererInfo renderer;
@@ -282,6 +316,10 @@ void refreshFieldRange(UiState& ui);
 /// which is what tells the application to keep redrawing rather than idling.
 bool updateSolver(UiState& ui);
 
+/// Re-extract the surface distributions and streamlines when the field moves.
+/// Runs after updateSolver, since both are read from the solved field.
+void updateSurface(UiState& ui);
+
 /// Restore the default view: origin centred, unit chord comfortably framed.
 void resetView(UiState& ui);
 
@@ -299,6 +337,7 @@ void drawGeometryPanel(UiState& ui);
 void drawMeshPanel(UiState& ui);
 void drawFlowPanel(UiState& ui);
 void drawSolverPanel(UiState& ui);
+void drawSurfacePanel(UiState& ui);
 void drawSessionPanel(UiState& ui);
 void drawViewport(UiState& ui);
 void drawConsole(UiState& ui);

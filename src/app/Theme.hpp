@@ -85,6 +85,18 @@ inline const ImVec4 kBcFarFieldIn{0.427f, 0.588f, 0.749f, 1.00f};
 inline const ImVec4 kBcFarFieldOut{0.545f, 0.667f, 0.639f, 1.00f};
 inline const ImVec4 kBcInternal{0.831f, 0.651f, 0.400f, 1.00f};
 
+// Surface post-processing. Upper and lower must be told apart instantly in the
+// distribution plots, so they are given opposed hues at equal lightness rather
+// than two shades of one colour. Separation is the one thing on these plots
+// worth alarming about, so it takes the only saturated red in the palette.
+inline const ImVec4 kSurfaceUpper{0.443f, 0.667f, 0.859f, 1.00f};  // cool
+inline const ImVec4 kSurfaceLower{0.863f, 0.667f, 0.376f, 1.00f};  // warm
+inline const ImVec4 kSeparation{0.878f, 0.376f, 0.353f, 1.00f};
+inline const ImVec4 kReversedFlow{0.878f, 0.376f, 0.353f, 1.00f};
+inline const ImVec4 kAttachedFlow{0.475f, 0.702f, 0.573f, 1.00f};
+inline const ImVec4 kStreamline{0.686f, 0.741f, 0.788f, 0.72f};
+inline const ImVec4 kStagnation{0.816f, 0.639f, 0.400f, 1.00f};
+
 // ---------------------------------------------------------------------------
 // Scalar field colour maps
 // ---------------------------------------------------------------------------

@@ -56,6 +56,11 @@ struct ApplicationOptions {
   /// Reynolds number based on the chord. Zero keeps the default.
   double reynoldsNumber{0.0};
 
+  /// Angle of attack in degrees. Zero is a legitimate value, so a separate
+  /// flag says whether one was asked for at all.
+  double angleOfAttackDeg{0.0};
+  bool angleGiven{false};
+
   /// Scalar shown in the viewport: "velocity", "vx", "vy", "pressure" or
   /// "divergence". Empty keeps the default.
   std::string initialFieldView{};

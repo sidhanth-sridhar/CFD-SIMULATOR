@@ -292,6 +292,7 @@ void Application::Impl::layoutAndDrawPanels() {
       drawMeshPanel(ui);
       drawFlowPanel(ui);
       drawSolverPanel(ui);
+      drawSurfacePanel(ui);
       drawSessionPanel(ui);
     }
     ImGui::End();
@@ -352,6 +353,9 @@ void Application::Impl::drawFrame() {
   // Returns true while the solve is running, which keeps the loop redrawing
   // instead of idling on events.
   solverWantsRedraw = updateSolver(ui);
+  // Last: the surface distributions and streamlines are read off whatever
+  // field the previous steps left behind.
+  updateSurface(ui);
 
   // Drain any trackpad pinch once per frame; the viewport applies and clears it.
   ui.pinchMagnification += platform::consumePinchMagnification();
@@ -427,19 +431,25 @@ Status Application::initialize(const ApplicationOptions& options) {
   if (options.initialiseFlow) {
     // A flow needs somewhere to live, so bring the mesh up with it if the
     // caller did not ask for one explicitly.
-    // Bring the mesh up too, but leave the view framed on the section: the
-    // interesting part of an initialised field is what happens at the wall,
-    // and only --mesh on its own means "show me the domain".
     if (!impl_->ui.meshing.enabled) {
       impl_->ui.meshing.enabled = true;
       impl_->ui.meshing.dirty = true;
     }
     impl_->ui.flow.enabled = true;
     impl_->ui.flow.dirty = true;
+    // Frame the section, not the domain: the interesting part of a flow is
+    // what happens at the wall, and at domain scale a chord is a few pixels.
+    // Only --mesh on its own means "show me the domain".
+    impl_->ui.meshing.pendingDomainFit = false;
   }
 
   if (options.reynoldsNumber > 0.0) {
     impl_->ui.flow.freestream.reynoldsNumber = options.reynoldsNumber;
+    impl_->ui.flow.dirty = true;
+  }
+
+  if (options.angleGiven) {
+    impl_->ui.flow.freestream.angleOfAttackDeg = options.angleOfAttackDeg;
     impl_->ui.flow.dirty = true;
   }
 
@@ -452,6 +462,9 @@ Status Application::initialize(const ApplicationOptions& options) {
     impl_->ui.flow.dirty = true;
     impl_->ui.solving.running = true;
     impl_->ui.solving.dirty = true;
+    impl_->ui.meshing.pendingDomainFit = false;
+    // A solved run is worth seeing the surface results of.
+    impl_->ui.surface.showStreamlines = true;
   }
 
   if (!options.initialFieldView.empty()) {

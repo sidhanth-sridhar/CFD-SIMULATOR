@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <format>
+#include <limits>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -707,6 +708,111 @@ void drawAirfoil(ImDrawList* draw, const UiState& ui, ImVec2 origin) {
   }
 }
 
+void drawStreamlines(ImDrawList* draw, const UiState& ui, ImVec2 origin) {
+  if (!ui.surface.showStreamlines || ui.surface.streamlines.empty()) {
+    return;
+  }
+  const ImU32 colour = ImGui::GetColorU32(theme::kStreamline);
+
+  std::vector<ImVec2> screen;
+  for (const post::Streamline& line : ui.surface.streamlines) {
+    if (line.size() < 2) {
+      continue;
+    }
+    screen.clear();
+    screen.reserve(line.size());
+    for (const Vec2& world : line) {
+      const Vec2 s = ui.camera.worldToScreen(world);
+      screen.push_back(ImVec2(static_cast<float>(static_cast<double>(origin.x) + s.x),
+                              static_cast<float>(static_cast<double>(origin.y) + s.y)));
+    }
+    draw->AddPolyline(screen.data(), static_cast<int>(screen.size()), colour, 1.1f, 0);
+  }
+}
+
+/// The surface, coloured by the sign and size of the computed wall shear.
+///
+/// This is the picture the separation number comes from, drawn directly from
+/// the same wall shear rather than from anything imposed: green where the fluid
+/// next to the wall still runs downstream, red where it has turned back, and
+/// brighter where the shear is larger. A separation point is exactly where the
+/// colour crosses over, so the marker and the colouring can be checked against
+/// one another by eye.
+void drawWallShear(ImDrawList* draw, const UiState& ui, ImVec2 origin) {
+  const SurfaceState& state = ui.surface;
+  if (!state.showWallShear || !state.distribution.has_value()) {
+    return;
+  }
+  const post::SurfaceDistribution& surface = *state.distribution;
+
+  const auto toScreen = [&](const Vec2& world) {
+    const Vec2 s = ui.camera.worldToScreen(world);
+    return ImVec2(static_cast<float>(static_cast<double>(origin.x) + s.x),
+                  static_cast<float>(static_cast<double>(origin.y) + s.y));
+  };
+
+  // Scale by the largest magnitude away from the nose, so the colouring stays
+  // readable whatever the Reynolds number. The nose is excluded for the same
+  // reason as in the Cf plot: skin friction is singular where the boundary
+  // layer starts, and scaling to that peak leaves the whole chord washed out.
+  double scale = 0.0;
+  for (const std::vector<post::SurfacePoint>* side : {&surface.upper, &surface.lower}) {
+    for (const post::SurfacePoint& point : *side) {
+      if (point.chordFraction >= 0.05) {
+        scale = std::max(scale, std::abs(point.skinFriction));
+      }
+    }
+  }
+  if (!(scale > 0.0)) {
+    scale = std::max(std::abs(surface.minSkinFriction), std::abs(surface.maxSkinFriction));
+  }
+  const auto colourFor = [&](const post::SurfacePoint& point) {
+    const ImVec4& base = point.reversed ? theme::kReversedFlow : theme::kAttachedFlow;
+    const double strength =
+        (scale > 0.0) ? std::clamp(std::abs(point.skinFriction) / scale, 0.0, 1.0) : 0.0;
+    // Never fully transparent: a station with almost no shear is precisely the
+    // interesting one, and must not vanish. Magnitude is shown by darkening
+    // towards the background rather than by fading out, so that what varies is
+    // the strength of the colour and not how much of the bright outline
+    // underneath shows through.
+    const float t = static_cast<float>(0.35 + 0.65 * std::sqrt(strength));
+    const ImVec4& ground = theme::kViewport;
+    return ImGui::GetColorU32(ImVec4(ground.x + (base.x - ground.x) * t,
+                                     ground.y + (base.y - ground.y) * t,
+                                     ground.z + (base.z - ground.z) * t, 1.0f));
+  };
+
+  for (const std::vector<post::SurfacePoint>* side : {&surface.upper, &surface.lower}) {
+    for (std::size_t i = 0; i + 1 < side->size(); ++i) {
+      const post::SurfacePoint& a = (*side)[i];
+      const post::SurfacePoint& b = (*side)[i + 1];
+      draw->AddLine(toScreen(a.position), toScreen(b.position), colourFor(a), 3.0f);
+    }
+  }
+
+  if (state.showSeparation) {
+    const ImU32 marker = ImGui::GetColorU32(theme::kSeparation);
+    for (const post::SeparationPoint* point :
+         {&surface.upperSeparation, &surface.lowerSeparation}) {
+      if (!point->found) {
+        continue;
+      }
+      const ImVec2 at = toScreen(point->position);
+      draw->AddCircle(at, 5.0f, marker, 0, 1.6f);
+      draw->AddLine(ImVec2(at.x, at.y - 12.0f), ImVec2(at.x, at.y - 5.0f), marker, 1.4f);
+      draw->AddText(ImVec2(at.x + 7.0f, at.y - 16.0f), marker,
+                    std::format("sep x/c {:.3f}", point->chordFraction).c_str());
+    }
+  }
+
+  // Where the oncoming stream divides. Its position is a solved result too, and
+  // seeing it move aft with incidence is the clearest confirmation of that.
+  const ImVec2 stagnation = toScreen(surface.stagnationPosition);
+  const ImU32 stagnationColour = ImGui::GetColorU32(theme::kStagnation);
+  draw->AddCircleFilled(stagnation, 2.6f, stagnationColour);
+  draw->AddCircle(stagnation, 5.5f, stagnationColour, 0, 1.0f);
+}
+
 /// A conventional CAD scale bar: a segment of known physical length with its
 /// value printed. It stays meaningful regardless of zoom or window size, which
 /// a bare "zoom %" number does not.
@@ -929,8 +1035,10 @@ void updateFlow(UiState& ui) {
   state.history.clear();
   state.history.record(0, state.residuals);
 
-  // The solver is built from this field, so it has to start again.
+  // The solver is built from this field, so it has to start again, and the
+  // surface quantities are read from it, so they have to be taken again.
   ui.solving.dirty = true;
+  ui.surface.dirty = true;
 
   CFD_LOG_INFO(kLogCategory,
                "flow initialised: U {:.4g} m/s at {:.2f} deg, Re {:.3g}, mu {:.3e} Pa.s, "
@@ -1038,8 +1146,102 @@ bool updateSolver(UiState& ui) {
   // range from the uniform starting state makes every solved value saturate,
   // which reads as a broken solution rather than a stale legend.
   refreshFieldRange(ui);
+  // Likewise the surface quantities, which are read off this field.
+  ui.surface.dirty = true;
 
   return state.running;
+}
+
+void updateSurface(UiState& ui) {
+  SurfaceState& state = ui.surface;
+  if (!state.dirty) {
+    return;
+  }
+  state.dirty = false;
+
+  state.distribution.reset();
+  state.streamlines.clear();
+  state.upperX.clear();
+  state.upperCp.clear();
+  state.upperCf.clear();
+  state.lowerX.clear();
+  state.lowerCp.clear();
+  state.lowerCf.clear();
+  state.errorMessage.clear();
+
+  if (!ui.meshing.mesh.has_value() || !ui.flow.field.has_value() ||
+      !ui.geometry.airfoil.has_value()) {
+    return;
+  }
+
+  const double chord = ui.geometry.airfoil->chord();
+  Result<post::SurfaceDistribution> extracted = post::extractSurface(
+      *ui.meshing.mesh, *ui.flow.field, ui.flow.freestream, chord);
+  if (!extracted) {
+    state.errorMessage = extracted.error().message();
+    return;
+  }
+  state.distribution = std::move(extracted).value();
+
+  const auto fill = [](const std::vector<post::SurfacePoint>& points,
+                       std::vector<float>& xs, std::vector<float>& cps,
+                       std::vector<float>& cfs) {
+    xs.reserve(points.size());
+    cps.reserve(points.size());
+    cfs.reserve(points.size());
+    for (const post::SurfacePoint& point : points) {
+      xs.push_back(static_cast<float>(point.chordFraction));
+      cps.push_back(static_cast<float>(point.pressureCoefficient));
+      cfs.push_back(static_cast<float>(point.skinFriction));
+    }
+  };
+  fill(state.distribution->upper, state.upperX, state.upperCp, state.upperCf);
+  fill(state.distribution->lower, state.lowerX, state.lowerCp, state.lowerCf);
+
+  if (state.showStreamlines) {
+    // Seed a rake upstream of the section, spread over rather more than its
+    // thickness so some lines pass close to the surface and some well clear.
+    const auto [lower, upper] = ui.geometry.airfoil->bounds();
+    const double span = std::max(upper.y - lower.y, 0.05 * chord) * 6.0;
+    const double centre = 0.5 * (upper.y + lower.y);
+
+    post::StreamlineOptions options;
+    options.referenceSpeed = ui.flow.freestream.speed;
+    options.maxSteps = 1500;
+    options.seeds.reserve(static_cast<std::size_t>(state.streamlineSeeds));
+    for (int i = 0; i < state.streamlineSeeds; ++i) {
+      const double t = (state.streamlineSeeds > 1)
+                           ? static_cast<double>(i) / (state.streamlineSeeds - 1)
+                           : 0.5;
+      options.seeds.push_back(Vec2{lower.x - 0.4 * chord, centre + span * (t - 0.5)});
+    }
+
+    Result<std::vector<post::Streamline>> traced =
+        post::traceStreamlines(*ui.meshing.mesh, *ui.flow.field, options);
+    if (traced) {
+      state.streamlines = std::move(traced).value();
+    }
+  }
+
+  const post::SurfaceDistribution& surface = *state.distribution;
+  const auto report = [&](const char* side, const post::SeparationPoint& point,
+                          double& reported) {
+    const double now = point.found ? point.chordFraction : -1.0;
+    // Only when it appears, disappears, or moves by a noticeable amount.
+    if (std::abs(now - reported) < 0.005) {
+      return;
+    }
+    if (point.found) {
+      CFD_LOG_INFO(kLogCategory,
+                   "{} surface separates at x/c = {:.4f} (wall shear reverses there)", side,
+                   point.chordFraction);
+    } else if (reported >= 0.0) {
+      CFD_LOG_INFO(kLogCategory, "{} surface is attached again", side);
+    }
+    reported = now;
+  };
+  report("upper", surface.upperSeparation, state.reportedUpperSeparation);
+  report("lower", surface.lowerSeparation, state.reportedLowerSeparation);
 }
 
 void fitDomain(UiState& ui) {
@@ -1810,6 +2012,279 @@ void drawSolverPanel(UiState& ui) {
   }
 }
 
+namespace {
+
+/// Vertical range of a pair of series, over the stations at or beyond `fromX`.
+///
+/// The cut-off exists for the skin friction. Cf is largest right at the nose -
+/// it grows like 1/sqrt(x) as the boundary layer starts from nothing - so
+/// scaling to the full range squashes the entire rest of the chord into a few
+/// pixels and hides the zero crossing, which is the one feature the plot is
+/// there to show. Excluding the first few per cent of chord from the *scaling*
+/// (never from the data, which is still drawn, and still reported in full in
+/// the summary table) puts the interesting part back on screen.
+struct PlotRange {
+  float low{0.0f};
+  float high{1.0f};
+};
+
+PlotRange rangeOf(const std::vector<float>& upperX, const std::vector<float>& upperY,
+                  const std::vector<float>& lowerX, const std::vector<float>& lowerY,
+                  float fromX) {
+  float low = std::numeric_limits<float>::max();
+  float high = std::numeric_limits<float>::lowest();
+
+  const auto scan = [&](const std::vector<float>& xs, const std::vector<float>& ys) {
+    for (std::size_t i = 0; i < ys.size() && i < xs.size(); ++i) {
+      if (xs[i] < fromX) {
+        continue;
+      }
+      low = std::min(low, ys[i]);
+      high = std::max(high, ys[i]);
+    }
+  };
+  scan(upperX, upperY);
+  scan(lowerX, lowerY);
+
+  if (!(high > low)) {
+    // Everything was excluded, or the field is flat.
+    if (!(low < std::numeric_limits<float>::max())) {
+      return PlotRange{-1.0f, 1.0f};
+    }
+    high = low + std::max(std::abs(low), 1.0f) * 0.1f;
+  }
+  const float pad = 0.08f * (high - low);
+  return PlotRange{low - pad, high + pad};
+}
+
+/// A small XY plot with axes, for the surface distributions.
+///
+/// ImGui's built-in PlotLines draws a bare polyline with no axes and one
+/// series. A Cp distribution needs two series on a shared chordwise axis, a
+/// marked zero line, and - by long convention - an inverted vertical axis, so
+/// that suction points upwards and the plot reads the way every textbook and
+/// wind-tunnel report draws it.
+///
+/// Points outside `range` are clamped to the frame rather than dropped, so a
+/// curve that runs off the top is visibly pinned to the edge instead of
+/// silently vanishing.
+void drawDistributionPlot(const char* id, const char* title, float height,
+                          const std::vector<float>& upperX,
+                          const std::vector<float>& upperY,
+                          const std::vector<float>& lowerX,
+                          const std::vector<float>& lowerY, PlotRange range, bool invertY,
+                          double upperSeparation, double lowerSeparation,
+                          bool showSeparation) {
+  if (upperY.empty() && lowerY.empty()) {
+    return;
+  }
+  const float low = range.low;
+  const float high = range.high;
+
+  ImGui::TextColored(theme::kTextDim, "%s", title);
+
+  const ImVec2 origin = ImGui::GetCursorScreenPos();
+  const float width = ImGui::GetContentRegionAvail().x;
+  const ImVec2 size(width, height);
+  ImGui::InvisibleButton(id, size);
+
+  ImDrawList* draw = ImGui::GetWindowDrawList();
+  const ImVec2 corner(origin.x + size.x, origin.y + size.y);
+  draw->AddRectFilled(origin, corner, ImGui::GetColorU32(theme::kViewport));
+
+  // Leave room on the left for the value labels.
+  constexpr float kLeftGutter = 44.0f;
+  constexpr float kBottomGutter = 16.0f;
+  const ImVec2 plotMin(origin.x + kLeftGutter, origin.y + 4.0f);
+  const ImVec2 plotMax(corner.x - 6.0f, corner.y - kBottomGutter);
+  if (plotMax.x <= plotMin.x || plotMax.y <= plotMin.y) {
+    return;
+  }
+
+  const auto toScreen = [&](float x, float y) {
+    const float fx = plotMin.x + (plotMax.x - plotMin.x) * std::clamp(x, 0.0f, 1.0f);
+    float t = std::clamp((y - low) / (high - low), 0.0f, 1.0f);
+    if (!invertY) {
+      t = 1.0f - t;  // screen y grows downwards
+    }
+    return ImVec2(fx, plotMin.y + (plotMax.y - plotMin.y) * t);
+  };
+
+  const ImU32 gridColour = ImGui::GetColorU32(theme::kGridMajor);
+  const ImU32 textColour = ImGui::GetColorU32(theme::kTextDisabled);
+
+  // Chordwise gridlines every fifth of the chord.
+  for (int i = 0; i <= 5; ++i) {
+    const float x = static_cast<float>(i) / 5.0f;
+    const ImVec2 top = toScreen(x, high);
+    draw->AddLine(ImVec2(top.x, plotMin.y), ImVec2(top.x, plotMax.y), gridColour, 1.0f);
+    draw->AddText(ImVec2(top.x - 8.0f, plotMax.y + 2.0f), textColour,
+                  std::format("{:.1f}", x).c_str());
+  }
+
+  // Zero line, if it is in range - the reference for both quantities.
+  if (low < 0.0f && high > 0.0f) {
+    const ImVec2 zero = toScreen(0.0f, 0.0f);
+    draw->AddLine(ImVec2(plotMin.x, zero.y), ImVec2(plotMax.x, zero.y),
+                  ImGui::GetColorU32(theme::kAxisX), 1.0f);
+  }
+
+  draw->AddText(ImVec2(origin.x + 4.0f, plotMin.y - 1.0f), textColour,
+                std::format("{:.3g}", invertY ? low : high).c_str());
+  draw->AddText(ImVec2(origin.x + 4.0f, plotMax.y - ImGui::GetTextLineHeight()), textColour,
+                std::format("{:.3g}", invertY ? high : low).c_str());
+
+  const auto plotSeries = [&](const std::vector<float>& xs, const std::vector<float>& ys,
+                              const ImVec4& colour) {
+    if (xs.size() < 2) {
+      return;
+    }
+    std::vector<ImVec2> screen;
+    screen.reserve(xs.size());
+    for (std::size_t i = 0; i < xs.size(); ++i) {
+      screen.push_back(toScreen(xs[i], ys[i]));
+    }
+    draw->AddPolyline(screen.data(), static_cast<int>(screen.size()),
+                      ImGui::GetColorU32(colour), 1.6f, 0);
+  };
+  plotSeries(upperX, upperY, theme::kSurfaceUpper);
+  plotSeries(lowerX, lowerY, theme::kSurfaceLower);
+
+  // Where the boundary layer detaches.
+  if (showSeparation) {
+    const ImU32 marker = ImGui::GetColorU32(theme::kSeparation);
+    for (const double station : {upperSeparation, lowerSeparation}) {
+      if (!(station > 0.0) || !(station < 1.0)) {
+        continue;
+      }
+      const ImVec2 at = toScreen(static_cast<float>(station), high);
+      draw->AddLine(ImVec2(at.x, plotMin.y), ImVec2(at.x, plotMax.y), marker, 1.2f);
+    }
+  }
+
+  draw->AddRect(plotMin, plotMax, ImGui::GetColorU32(theme::kBorder));
+}
+
+}  // namespace
+
+void drawSurfacePanel(UiState& ui) {
+  SurfaceState& state = ui.surface;
+
+  if (!ImGui::CollapsingHeader("Surface", ImGuiTreeNodeFlags_DefaultOpen)) {
+    return;
+  }
+  if (!state.distribution.has_value()) {
+    if (!state.errorMessage.empty()) {
+      ImGui::PushStyleColor(ImGuiCol_Text, theme::kLevelError);
+      ImGui::TextWrapped("%s", state.errorMessage.c_str());
+      ImGui::PopStyleColor();
+    } else {
+      ImGui::TextColored(theme::kTextDisabled, "Needs a meshed section with a flow.");
+    }
+    return;
+  }
+
+  const post::SurfaceDistribution& surface = *state.distribution;
+
+  ImGui::Checkbox("Wall shear", &state.showWallShear);
+  ImGui::SameLine();
+  ImGui::Checkbox("Separation", &state.showSeparation);
+  if (ImGui::Checkbox("Streamlines", &state.showStreamlines)) {
+    state.dirty = true;
+  }
+  ImGui::SameLine();
+  ImGui::Checkbox("Plots", &state.showSurfacePlots);
+
+  // Ranges of the raw quantities, alongside their coefficients: a coefficient
+  // is a ratio, and it is easy to lose track of what it is a ratio of.
+  double minPressure = std::numeric_limits<double>::max();
+  double maxPressure = std::numeric_limits<double>::lowest();
+  double maxSurfaceSpeed = 0.0;
+  double maxWallShear = 0.0;
+  for (const std::vector<post::SurfacePoint>* side : {&surface.upper, &surface.lower}) {
+    for (const post::SurfacePoint& point : *side) {
+      minPressure = std::min(minPressure, point.pressure);
+      maxPressure = std::max(maxPressure, point.pressure);
+      maxSurfaceSpeed = std::max(maxSurfaceSpeed, point.nearWallSpeed);
+      maxWallShear = std::max(maxWallShear, std::abs(point.wallShear));
+    }
+  }
+
+  ImGui::Spacing();
+  if (beginInfoTable("surface_summary", 104.0f)) {
+    infoRow(ui, "Stations", std::format("{} upper, {} lower", surface.upper.size(),
+                                        surface.lower.size()));
+    infoRow(ui, "Stagnation", std::format("x/c = {:.4f}", surface.stagnationChordFraction));
+    infoRow(ui, "Pressure", std::format("{:+.4g} to {:+.4g} Pa", minPressure, maxPressure));
+    infoRow(ui, "Cp range", std::format("{:+.3f} to {:+.3f}", surface.minPressureCoefficient,
+                                        surface.maxPressureCoefficient));
+    infoRow(ui, "Wall shear", std::format("up to {:.4g} Pa", maxWallShear));
+    infoRow(ui, "Cf range", std::format("{:+.4f} to {:+.4f}", surface.minSkinFriction,
+                                        surface.maxSkinFriction));
+    infoRow(ui, "Near-wall U", std::format("up to {:.4g} m/s", maxSurfaceSpeed));
+    ImGui::EndTable();
+  }
+
+  // Separation is reported only where the computed wall shear reverses.
+  ImGui::Spacing();
+  if (surface.hasSeparation()) {
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::kSeparation);
+    if (surface.upperSeparation.found) {
+      ImGui::Text("Upper surface separates at x/c = %.4f",
+                  surface.upperSeparation.chordFraction);
+    }
+    if (surface.lowerSeparation.found) {
+      ImGui::Text("Lower surface separates at x/c = %.4f",
+                  surface.lowerSeparation.chordFraction);
+    }
+    ImGui::PopStyleColor();
+  } else {
+    ImGui::TextColored(theme::kTextDim, "Attached: the wall shear does not reverse.");
+  }
+  ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDisabled);
+  ImGui::TextWrapped("Found from the sign of the computed wall shear, not imposed.");
+  ImGui::PopStyleColor();
+
+  if (!state.showSurfacePlots) {
+    return;
+  }
+
+  const double upperSep =
+      surface.upperSeparation.found ? surface.upperSeparation.chordFraction : -1.0;
+  const double lowerSep =
+      surface.lowerSeparation.found ? surface.lowerSeparation.chordFraction : -1.0;
+
+  ImGui::Spacing();
+  // Cp is drawn with its axis inverted, the universal convention: suction is
+  // up, so the upper surface of a lifting section sits above the lower one.
+  // Its whole range is used; unlike Cf it has no singularity to hide.
+  drawDistributionPlot("##cp", "Cp - inverted, suction up", 150.0f, state.upperX,
+                       state.upperCp, state.lowerX, state.lowerCp,
+                       rangeOf(state.upperX, state.upperCp, state.lowerX, state.lowerCp, 0.0f),
+                       true, upperSep, lowerSep, state.showSeparation);
+
+  ImGui::Spacing();
+  constexpr float kCfScaleFrom = 0.05f;
+  drawDistributionPlot(
+      "##cf", "Cf - below zero the flow has reversed", 130.0f, state.upperX, state.upperCf,
+      state.lowerX, state.lowerCf,
+      rangeOf(state.upperX, state.upperCf, state.lowerX, state.lowerCf, kCfScaleFrom), false,
+      upperSep, lowerSep, state.showSeparation);
+  ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDisabled);
+  ImGui::TextWrapped(
+      "Scaled from x/c = %.2f: Cf is singular at the nose, and the full range would "
+      "flatten the zero crossing. The table above gives the true extremes.",
+      static_cast<double>(kCfScaleFrom));
+  ImGui::PopStyleColor();
+
+  ImGui::Spacing();
+  ImGui::TextColored(theme::kSurfaceUpper, "upper");
+  ImGui::SameLine();
+  ImGui::TextColored(theme::kSurfaceLower, "lower");
+  ImGui::SameLine();
+  ImGui::TextColored(theme::kTextDisabled, " - x/c runs left to right");
+}
+
 void drawSessionPanel(UiState& ui) {
   if (ImGui::CollapsingHeader("Build")) {
     if (beginInfoTable("build_info")) {
@@ -1992,7 +2467,19 @@ void drawViewport(UiState& ui) {
     }
   }
 
+  // Streamlines sit under the section: they are traced through the fluid, and
+  // a curve appearing to cross the solid body would be a lie about the flow.
+  if (haveFlow) {
+    drawStreamlines(draw, ui, origin);
+  }
+
   drawAirfoil(draw, ui, origin);
+
+  // Wall shear is painted last of the field graphics, over the outline it
+  // belongs to, so the sign of the surface flow is never hidden by the fill.
+  if (haveFlow) {
+    drawWallShear(draw, ui, origin);
+  }
 
   if (haveFlow) {
     if (ui.flow.showField) {
