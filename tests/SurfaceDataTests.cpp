@@ -14,6 +14,7 @@
 
 #include "cfd/geom/Airfoil.hpp"
 #include "cfd/mesh/CGrid.hpp"
+#include "cfd/post/Streamlines.hpp"
 #include "cfd/solver/SimpleSolver.hpp"
 
 namespace {
@@ -62,6 +63,10 @@ FlowField constantField(const Mesh& mesh, double pressure, Vec2 velocity,
     field.viscosity[c] = viscosity;
   }
   return field;
+}
+
+FlowField field_unused_placeholder(const Mesh& mesh) {
+  return constantField(mesh, 0.0, Vec2{1.0, 0.0});
 }
 
 SurfaceDistribution extract(const FlowField& field, const FreestreamConditions& conditions) {
@@ -353,6 +358,90 @@ TEST(SurfaceData, IncidenceMovesTheStagnationPointAndSeparatesTheSuctionSide) {
   // Suction: the upper surface reaches a lower minimum pressure than at zero
   // incidence, which is where lift comes from.
   EXPECT_LT(pitched.minPressureCoefficient, level.minPressureCoefficient);
+}
+
+
+// ---------------------------------------------------------------------------
+// Streamlines
+// ---------------------------------------------------------------------------
+
+TEST(Streamlines, LocatesTheCellContainingAPoint) {
+  const Mesh& mesh = sharedMesh();
+
+  // Every cell centroid must be found inside its own cell.
+  for (std::size_t c = 0; c < mesh.cellCount(); c += 97) {
+    const int found = cfd::post::locateCell(mesh, mesh.cellCentroids()[c], -1);
+    EXPECT_EQ(static_cast<int>(c), found) << "centroid of cell " << c;
+  }
+
+  // A point far outside the domain belongs to nothing.
+  EXPECT_EQ(-1, cfd::post::locateCell(mesh, Vec2{1e6, 1e6}, -1));
+}
+
+// Walking is only asked to travel a short way, which is how it is used: the
+// hint is the cell the previous step ended in. A hint on the far side of the
+// section cannot work, because the walk would have to pass through the solid.
+TEST(Streamlines, WalkingFromANearbyHintMatchesASearch) {
+  const Mesh& mesh = sharedMesh();
+
+  for (std::size_t c = 5; c < mesh.cellCount(); c += 313) {
+    const Vec2 point = mesh.cellCentroids()[c];
+
+    // Start from a face neighbour, as a tracer would.
+    int hint = static_cast<int>(c);
+    for (const int faceIndex : mesh.cellFaces()[c]) {
+      const int across = cfd::mesh::oppositeCell(mesh, static_cast<std::size_t>(faceIndex));
+      if (across >= 0 && across != static_cast<int>(c)) {
+        hint = across;
+        break;
+      }
+    }
+    EXPECT_EQ(static_cast<int>(c), cfd::post::locateCell(mesh, point, hint)) << "cell " << c;
+  }
+}
+
+// In a uniform stream every streamline is a straight line along it. Anything
+// else means the integrator, not the flow, is bending the path.
+TEST(Streamlines, AreStraightInAUniformField) {
+  const Mesh& mesh = sharedMesh();
+  const FlowField field = constantField(mesh, 0.0, Vec2{1.0, 0.0});
+
+  cfd::post::StreamlineOptions options;
+  options.referenceSpeed = 1.0;
+  options.seeds = {Vec2{-4.0, 2.0}, Vec2{-4.0, -3.0}};
+  options.maxSteps = 500;
+
+  auto result = cfd::post::traceStreamlines(mesh, field, options);
+  ASSERT_TRUE(result) << (result.hasError() ? result.error().format() : "");
+  ASSERT_EQ(2u, result.value().size());
+
+  for (const auto& line : result.value()) {
+    ASSERT_GT(line.size(), 10u);
+    const double y = line.front().y;
+    double previousX = line.front().x;
+    for (const Vec2& point : line) {
+      EXPECT_NEAR(y, point.y, 1e-9) << "the path should not drift across the stream";
+      EXPECT_GE(point.x, previousX - 1e-12) << "the path should not double back";
+      previousX = point.x;
+    }
+  }
+}
+
+TEST(Streamlines, SkipSeedsOutsideTheDomain) {
+  const Mesh& mesh = sharedMesh();
+  cfd::post::StreamlineOptions options;
+  options.seeds = {Vec2{1e5, 1e5}};
+  auto result = cfd::post::traceStreamlines(mesh, field_unused_placeholder(mesh), options);
+  ASSERT_TRUE(result);
+  EXPECT_TRUE(result.value().empty());
+}
+
+TEST(Streamlines, RejectAMismatchedField) {
+  FlowField wrong;
+  wrong.resize(3);
+  cfd::post::StreamlineOptions options;
+  options.seeds = {Vec2{0.0, 0.0}};
+  EXPECT_TRUE(cfd::post::traceStreamlines(sharedMesh(), wrong, options).hasError());
 }
 
 }  // namespace

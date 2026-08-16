@@ -189,6 +189,16 @@ class Mesh {
   int nodesJ_{0};
 };
 
+/// The cell on the far side of a face, or -1 if there is none.
+///
+/// For an ordinary interior face that is simply the neighbour. For a wake cut
+/// it is the owner of the partner face: the two coincide in space, so they
+/// behave as one interior connection even though the mesh stores them as two
+/// boundary faces. Anything that traverses the mesh - flux assembly, a matrix
+/// product, a streamline walk - has to agree about this, which is why it lives
+/// with the mesh rather than in any one consumer.
+[[nodiscard]] int oppositeCell(const Mesh& mesh, std::size_t face) noexcept;
+
 /// Turn a block of structured nodes into a mesh: enumerate cells and faces,
 /// assign owners, neighbours and boundary types, and compute every metric.
 ///

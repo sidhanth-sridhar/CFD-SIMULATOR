@@ -75,6 +75,17 @@ std::size_t Mesh::countFaces(BoundaryType type) const {
       [type](const Face& face) { return face.boundary == type; }));
 }
 
+int oppositeCell(const Mesh& mesh, std::size_t face) noexcept {
+  const Face& f = mesh.faces()[face];
+  if (f.neighbour >= 0) {
+    return f.neighbour;
+  }
+  if (f.boundary == BoundaryType::WakeCut && f.partner >= 0) {
+    return mesh.faces()[static_cast<std::size_t>(f.partner)].owner;
+  }
+  return -1;
+}
+
 Result<Mesh> buildStructured(StructuredMeshSpec spec) {
   const int ni = spec.nodesI;
   const int nj = spec.nodesJ;

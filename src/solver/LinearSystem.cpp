@@ -15,17 +15,6 @@ void LinearSystem::clear() {
   std::fill(lower.begin(), lower.end(), 0.0);
 }
 
-int oppositeCell(const mesh::Mesh& mesh, std::size_t face) noexcept {
-  const mesh::Face& f = mesh.faces()[face];
-  if (f.neighbour >= 0) {
-    return f.neighbour;
-  }
-  if (f.boundary == mesh::BoundaryType::WakeCut && f.partner >= 0) {
-    return mesh.faces()[static_cast<std::size_t>(f.partner)].owner;
-  }
-  return -1;
-}
-
 void LinearSystem::multiply(const mesh::Mesh& mesh, const std::vector<double>& x,
                             std::vector<double>& y) const {
   y.assign(diagonal.size(), 0.0);

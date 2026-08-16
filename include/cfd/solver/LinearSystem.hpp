@@ -70,14 +70,9 @@ class LinearSystem {
   [[nodiscard]] bool isSymmetric(const mesh::Mesh& mesh, double tolerance = 1e-12) const;
 };
 
-/// The cell on the far side of a face, or -1 if there is none.
-///
-/// For an ordinary interior face that is simply the neighbour. For a wake cut
-/// it is the owner of the partner face: the two coincide in space, so they
-/// behave as one interior connection even though the mesh stores them as two
-/// boundary faces. Every part of the discretisation has to agree about this,
-/// which is why it lives in one place.
-[[nodiscard]] int oppositeCell(const mesh::Mesh& mesh, std::size_t face) noexcept;
+/// Re-exported so solver code can say `oppositeCell` unqualified; the
+/// definition belongs to the mesh.
+using mesh::oppositeCell;
 
 /// Gauss-Seidel sweeps, in place.
 ///
