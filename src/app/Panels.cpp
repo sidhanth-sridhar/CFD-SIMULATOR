@@ -823,6 +823,29 @@ bool isSignedField(FieldView view) noexcept {
   return false;
 }
 
+void refreshFieldRange(UiState& ui) {
+  FlowState& state = ui.flow;
+  if (!state.autoRange || !state.field.has_value()) {
+    return;
+  }
+
+  double low = std::numeric_limits<double>::max();
+  double high = std::numeric_limits<double>::lowest();
+  for (std::size_t c = 0; c < state.field->size(); ++c) {
+    const double value = fieldValue(ui, state.view, c);
+    low = std::min(low, value);
+    high = std::max(high, value);
+  }
+  if (isSignedField(state.view)) {
+    // Centre a signed map on zero so the neutral colour means zero.
+    const double extent = std::max(std::abs(low), std::abs(high));
+    low = -extent;
+    high = extent;
+  }
+  state.rangeMin = low;
+  state.rangeMax = high;
+}
+
 void updateFlow(UiState& ui) {
   FlowState& state = ui.flow;
   if (!state.dirty) {
@@ -897,23 +920,7 @@ void updateFlow(UiState& ui) {
     }
   }
 
-  if (state.autoRange) {
-    double low = std::numeric_limits<double>::max();
-    double high = std::numeric_limits<double>::lowest();
-    for (std::size_t c = 0; c < state.field->size(); ++c) {
-      const double value = fieldValue(ui, state.view, c);
-      low = std::min(low, value);
-      high = std::max(high, value);
-    }
-    if (isSignedField(state.view)) {
-      // Centre a signed map on zero so the neutral colour means zero.
-      const double extent = std::max(std::abs(low), std::abs(high));
-      low = -extent;
-      high = extent;
-    }
-    state.rangeMin = low;
-    state.rangeMax = high;
-  }
+  refreshFieldRange(ui);
 
   // The state is an initialisation, not the result of a step, so the clock
   // stays at zero. The residual is recorded at iteration 0 all the same: it is
@@ -922,12 +929,117 @@ void updateFlow(UiState& ui) {
   state.history.clear();
   state.history.record(0, state.residuals);
 
+  // The solver is built from this field, so it has to start again.
+  ui.solving.dirty = true;
+
   CFD_LOG_INFO(kLogCategory,
                "flow initialised: U {:.4g} m/s at {:.2f} deg, Re {:.3g}, mu {:.3e} Pa.s, "
                "continuity residual {:.3e}, max |div u| {:.3e} 1/s",
                state.freestream.speed, state.freestream.angleOfAttackDeg,
                state.freestream.reynoldsNumber, state.freestream.dynamicViscosity(chord),
                state.residuals.continuity, flow::maxAbsDivergence(state.divergence));
+}
+
+bool updateSolver(UiState& ui) {
+  SolverState& state = ui.solving;
+
+  if (state.dirty) {
+    state.dirty = false;
+    state.engine.reset();
+    state.errorMessage.clear();
+    state.iteration = 0;
+    state.converged = false;
+    state.hitIterationLimit = false;
+    state.monitor = solver::SolverMonitor{};
+    state.continuityHistory.clear();
+    state.momentumHistory.clear();
+
+    // The solver needs a mesh to live on and a field to start from, so it can
+    // only exist once both stages ahead of it have produced something.
+    if (!ui.meshing.mesh.has_value() || !ui.flow.field.has_value()) {
+      state.running = false;
+      return false;
+    }
+
+    Result<flow::FaceConditions> conditions = flow::buildFaceConditions(
+        *ui.meshing.mesh, ui.flow.conditions, ui.flow.freestream);
+    if (!conditions) {
+      state.errorMessage = conditions.error().message();
+      state.running = false;
+      return false;
+    }
+
+    Result<solver::SimpleSolver> created = solver::SimpleSolver::create(
+        *ui.meshing.mesh, std::move(conditions).value(), state.settings);
+    if (!created) {
+      state.errorMessage = created.error().message();
+      state.running = false;
+      return false;
+    }
+    state.engine = std::move(created).value();
+
+    if (const Status started = state.engine->initialise(*ui.flow.field); !started) {
+      state.errorMessage = started.error().message();
+      state.engine.reset();
+      state.running = false;
+      return false;
+    }
+  }
+
+  if (!state.engine.has_value() || !state.running) {
+    return false;
+  }
+
+  state.engine->setSettings(state.settings);
+  for (int i = 0; i < std::max(1, state.iterationsPerFrame); ++i) {
+    state.monitor = state.engine->iterate();
+    ++state.iteration;
+
+    // Record log10 of the residuals: they fall by many orders of magnitude, so
+    // a linear plot would show a vertical drop and then a flat line.
+    const auto asLog = [](double value) {
+      return static_cast<float>(std::log10(std::max(value, 1e-20)));
+    };
+    state.continuityHistory.push_back(asLog(state.monitor.residuals.continuity));
+    state.momentumHistory.push_back(
+        asLog(std::max(state.monitor.residuals.momentumX, state.monitor.residuals.momentumY)));
+
+    if (!std::isfinite(state.monitor.residuals.continuity) ||
+        !std::isfinite(state.monitor.residuals.momentumX)) {
+      state.errorMessage =
+          "the solve diverged; lower the relaxation factors and start again";
+      state.running = false;
+      return false;
+    }
+    if (state.monitor.residuals.worst() < state.convergenceTolerance) {
+      state.converged = true;
+      state.running = false;
+      CFD_LOG_INFO(kLogCategory, "converged after {} iterations, continuity {:.3e}",
+                   state.iteration, state.monitor.residuals.continuity);
+      break;
+    }
+    if (state.iteration >= state.maxIterations) {
+      state.hitIterationLimit = true;
+      state.running = false;
+      CFD_LOG_WARN(kLogCategory,
+                   "stopped at the {} iteration limit; continuity {:.3e}, momentum {:.3e} "
+                   "- not converged",
+                   state.maxIterations, state.monitor.residuals.continuity,
+                   state.monitor.residuals.worst());
+      break;
+    }
+  }
+
+  // The viewport reads the solver's field directly, so publish it.
+  ui.flow.field = state.engine->field();
+  ui.flow.divergence = state.engine->divergence();
+  ui.flow.residuals = state.monitor.residuals;
+  // The field has moved, so the colour map has to move with it. Leaving the
+  // range from the uniform starting state makes every solved value saturate,
+  // which reads as a broken solution rather than a stale legend.
+  refreshFieldRange(ui);
+
+  return state.running;
 }
 
 void fitDomain(UiState& ui) {
@@ -1560,6 +1672,141 @@ void drawFlowPanel(UiState& ui) {
                         nullptr, "%.4g");
       ImGui::EndTable();
     }
+  }
+}
+
+void drawSolverPanel(UiState& ui) {
+  SolverState& state = ui.solving;
+
+  if (!ImGui::CollapsingHeader("Solve", ImGuiTreeNodeFlags_DefaultOpen)) {
+    return;
+  }
+  if (!ui.flow.enabled || !ui.flow.field.has_value()) {
+    ImGui::TextColored(theme::kTextDisabled, "An initialised flow is needed first.");
+    return;
+  }
+
+  // --- run controls ---
+  const float buttonWidth = (ImGui::GetContentRegionAvail().x - 12.0f) / 3.0f;
+  if (ImGui::Button(state.running ? "Pause" : "Run", ImVec2(buttonWidth, 0.0f))) {
+    state.running = !state.running;
+    if (state.running) {
+      state.converged = false;
+    }
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Step", ImVec2(buttonWidth, 0.0f)) && state.engine.has_value()) {
+    state.running = true;
+    const int saved = state.iterationsPerFrame;
+    state.iterationsPerFrame = 1;
+    updateSolver(ui);
+    state.iterationsPerFrame = saved;
+    state.running = false;
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Reset", ImVec2(buttonWidth, 0.0f))) {
+    state.running = false;
+    state.dirty = true;  // rebuild from the initialised field
+  }
+
+  if (!state.errorMessage.empty()) {
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::kLevelError);
+    ImGui::TextWrapped("%s", state.errorMessage.c_str());
+    ImGui::PopStyleColor();
+  }
+  if (state.converged) {
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::kBcOutlet);
+    ImGui::Text("Converged after %lld iterations.", state.iteration);
+    ImGui::PopStyleColor();
+  }
+  if (state.hitIterationLimit) {
+    // Said plainly: a run that stopped on the limit has not converged, and the
+    // field on screen is whatever the iteration happened to reach.
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::kLevelWarning);
+    ImGui::TextWrapped("Stopped at the %lld iteration limit. Not converged - the field "
+                       "shown is not a solution.", state.maxIterations);
+    ImGui::PopStyleColor();
+  }
+
+  // --- progress ---
+  ImGui::Spacing();
+  ImGui::SeparatorText("Residuals");
+  if (beginInfoTable("solver_residuals", 104.0f)) {
+    infoRow(ui, "Iteration", std::format("{}", state.iteration));
+    infoRow(ui, "Continuity", std::format("{:.4e}", state.monitor.residuals.continuity));
+    infoRow(ui, "Momentum x", std::format("{:.4e}", state.monitor.residuals.momentumX));
+    infoRow(ui, "Momentum y", std::format("{:.4e}", state.monitor.residuals.momentumY));
+    infoRow(ui, "Max |div u|", std::format("{:.4e} 1/s", state.monitor.maxDivergence));
+    infoRow(ui, "Mass imbal.", std::format("{:.4e}", state.monitor.massImbalance));
+    ImGui::EndTable();
+  }
+
+  // Convergence history, plotted as log10 so several orders of magnitude are
+  // legible at once. A residual that flattens has stalled, not converged, and
+  // the shape of this curve is the only way to tell the difference.
+  if (state.continuityHistory.size() > 1) {
+    ImGui::Spacing();
+    const float latest = state.continuityHistory.back();
+    ImGui::PlotLines("##continuity", state.continuityHistory.data(),
+                     static_cast<int>(state.continuityHistory.size()), 0,
+                     std::format("continuity  1e{:.1f}", latest).c_str(), -20.0f, 2.0f,
+                     ImVec2(-FLT_MIN, 60.0f));
+    ImGui::PlotLines("##momentum", state.momentumHistory.data(),
+                     static_cast<int>(state.momentumHistory.size()), 0,
+                     std::format("momentum  1e{:.1f}",
+                                 state.momentumHistory.back()).c_str(),
+                     -20.0f, 2.0f, ImVec2(-FLT_MIN, 60.0f));
+  }
+
+  // --- settings ---
+  ImGui::Spacing();
+  ImGui::SeparatorText("Settings");
+  ImGui::TextColored(theme::kTextDisabled,
+                     "Changing these restarts from the initialised field.");
+
+  if (beginInfoTable("solver_settings", 104.0f)) {
+    const auto relaxRow = [&](const char* label, const char* id, double* value) {
+      ImGui::TableNextRow();
+      ImGui::TableSetColumnIndex(0);
+      ImGui::TextColored(theme::kTextDim, "%s", label);
+      ImGui::TableSetColumnIndex(1);
+      ImGui::SetNextItemWidth(-FLT_MIN);
+      if (ImGui::DragScalar(id, ImGuiDataType_Double, value, 0.005f, nullptr, nullptr,
+                            "%.3f")) {
+        *value = std::clamp(*value, 0.01, 1.0);
+        state.dirty = true;
+      }
+    };
+    relaxRow("Relax u", "##relaxu", &state.settings.velocityRelaxation);
+    relaxRow("Relax p", "##relaxp", &state.settings.pressureRelaxation);
+
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::TextColored(theme::kTextDim, "Convection");
+    ImGui::TableSetColumnIndex(1);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::BeginCombo("##scheme",
+                          std::string{toString(state.settings.scheme)}.c_str())) {
+      for (const solver::ConvectionScheme option :
+           {solver::ConvectionScheme::Upwind, solver::ConvectionScheme::SecondOrderUpwind}) {
+        const bool selected = (state.settings.scheme == option);
+        if (ImGui::Selectable(std::string{toString(option)}.c_str(), selected)) {
+          state.settings.scheme = option;
+          state.dirty = true;
+        }
+      }
+      ImGui::EndCombo();
+    }
+
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::TextColored(theme::kTextDim, "Iters/frame");
+    ImGui::TableSetColumnIndex(1);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::DragInt("##perframe", &state.iterationsPerFrame, 0.2f, 1, 200)) {
+      state.iterationsPerFrame = std::clamp(state.iterationsPerFrame, 1, 200);
+    }
+    ImGui::EndTable();
   }
 }
 

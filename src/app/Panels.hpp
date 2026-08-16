@@ -28,6 +28,7 @@
 #include "cfd/flow/Freestream.hpp"
 #include "cfd/mesh/CGrid.hpp"
 #include "cfd/mesh/Mesh.hpp"
+#include "cfd/solver/SimpleSolver.hpp"
 
 namespace cfd::app {
 
@@ -174,6 +175,37 @@ struct FlowState {
   bool shadingComplete{true};
 };
 
+/// The solver, its controls and its convergence history.
+struct SolverState {
+  /// Rebuilt whenever the mesh, the flow or the settings change. Holds a
+  /// pointer to the mesh, so it must not outlive one.
+  std::optional<solver::SimpleSolver> engine;
+  solver::SimpleSettings settings;
+
+  bool running{false};
+  /// Outer iterations per rendered frame. Iterating a few times per frame
+  /// keeps the window responsive and lets the flow be watched developing,
+  /// rather than freezing until the answer is ready.
+  int iterationsPerFrame{5};
+  /// Stop automatically once every residual is below this.
+  double convergenceTolerance{1e-6};
+  /// Stop after this many outer iterations regardless. A run that is not
+  /// converging should end and say so rather than spin indefinitely.
+  long long maxIterations{5000};
+  bool converged{false};
+  bool hitIterationLimit{false};
+
+  long long iteration{0};
+  solver::SolverMonitor monitor;
+  /// log10 of the continuity residual, for the convergence plot.
+  std::vector<float> continuityHistory;
+  std::vector<float> momentumHistory;
+
+  std::string errorMessage;
+  /// Set when anything the solver was built from changes.
+  bool dirty{true};
+};
+
 /// Everything the UI reads or mutates during a frame.
 ///
 /// A single plain struct rather than a web of widget objects: with immediate
@@ -220,6 +252,7 @@ struct UiState {
   GeometryState geometry;
   MeshState meshing;
   FlowState flow;
+  SolverState solving;
 
   theme::Fonts fonts;
   RendererInfo renderer;
@@ -240,6 +273,15 @@ void updateMesh(UiState& ui);
 /// the mesh and the conditions are applied to its faces.
 void updateFlow(UiState& ui);
 
+/// Rescale the field colour map to whatever the field currently holds. Must be
+/// called after anything that changes it, not only after initialisation.
+void refreshFieldRange(UiState& ui);
+
+/// Rebuild the solver if needed and, while running, advance it. Must run after
+/// updateFlow. Returns true if the solver wants another frame immediately,
+/// which is what tells the application to keep redrawing rather than idling.
+bool updateSolver(UiState& ui);
+
 /// Restore the default view: origin centred, unit chord comfortably framed.
 void resetView(UiState& ui);
 
@@ -256,6 +298,7 @@ void drawToolbar(UiState& ui);
 void drawGeometryPanel(UiState& ui);
 void drawMeshPanel(UiState& ui);
 void drawFlowPanel(UiState& ui);
+void drawSolverPanel(UiState& ui);
 void drawSessionPanel(UiState& ui);
 void drawViewport(UiState& ui);
 void drawConsole(UiState& ui);

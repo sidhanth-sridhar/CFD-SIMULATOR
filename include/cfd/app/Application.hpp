@@ -50,6 +50,12 @@ struct ApplicationOptions {
   /// Initialise the flow at startup. Requires a mesh, so it implies --mesh.
   bool initialiseFlow{false};
 
+  /// Start the solver running at startup. Implies --flow.
+  bool startSolver{false};
+
+  /// Reynolds number based on the chord. Zero keeps the default.
+  double reynoldsNumber{0.0};
+
   /// Scalar shown in the viewport: "velocity", "vx", "vy", "pressure" or
   /// "divergence". Empty keeps the default.
   std::string initialFieldView{};

@@ -36,14 +36,15 @@ target_include_directories(cfd_app
         # and are intentionally not on the public include path.
         "${CMAKE_CURRENT_SOURCE_DIR}")
 
-# cfd::flow is PRIVATE, and carries mesh, geometry and core with it: the
-# viewport draws sections, grids and fields, but Application.hpp exposes
-# nothing from those modules, so callers do not inherit them.
+# cfd::solver is PRIVATE, and carries flow, mesh, geometry and core with it:
+# the viewport draws sections, grids and fields and the panel drives a solve,
+# but Application.hpp exposes nothing from those modules, so callers do not
+# inherit them.
 target_link_libraries(cfd_app
     PUBLIC
         cfd::core
     PRIVATE
-        cfd::flow
+        cfd::solver
         imgui::imgui
         glfw
         OpenGL::GL

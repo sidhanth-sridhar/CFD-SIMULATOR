@@ -235,6 +235,8 @@ bool beginPanel(const char* name, ImVec2 pos, ImVec2 size,
 struct Application::Impl {
   GLFWwindow* window{nullptr};
   bool imguiPlatformReady{false};
+  /// Set each frame by the solver: true while it still has work to do.
+  bool solverWantsRedraw{false};
   bool imguiRendererReady{false};
   bool contextCreated{false};
   UiState ui;
@@ -289,6 +291,7 @@ void Application::Impl::layoutAndDrawPanels() {
       drawGeometryPanel(ui);
       drawMeshPanel(ui);
       drawFlowPanel(ui);
+      drawSolverPanel(ui);
       drawSessionPanel(ui);
     }
     ImGui::End();
@@ -346,6 +349,9 @@ void Application::Impl::drawFrame() {
   // flow is sized by the grid.
   updateMesh(ui);
   updateFlow(ui);
+  // Returns true while the solve is running, which keeps the loop redrawing
+  // instead of idling on events.
+  solverWantsRedraw = updateSolver(ui);
 
   // Drain any trackpad pinch once per frame; the viewport applies and clears it.
   ui.pinchMagnification += platform::consumePinchMagnification();
@@ -430,6 +436,22 @@ Status Application::initialize(const ApplicationOptions& options) {
     }
     impl_->ui.flow.enabled = true;
     impl_->ui.flow.dirty = true;
+  }
+
+  if (options.reynoldsNumber > 0.0) {
+    impl_->ui.flow.freestream.reynoldsNumber = options.reynoldsNumber;
+    impl_->ui.flow.dirty = true;
+  }
+
+  if (options.startSolver) {
+    if (!impl_->ui.meshing.enabled) {
+      impl_->ui.meshing.enabled = true;
+      impl_->ui.meshing.dirty = true;
+    }
+    impl_->ui.flow.enabled = true;
+    impl_->ui.flow.dirty = true;
+    impl_->ui.solving.running = true;
+    impl_->ui.solving.dirty = true;
   }
 
   if (!options.initialFieldView.empty()) {
@@ -547,9 +569,9 @@ int Application::run() {
   long long frameIndex = 0;
 
   while (glfwWindowShouldClose(impl_->window) == 0) {
-    if (capturing) {
-      // Do not block on input while producing a screenshot; there is no user
-      // to generate events.
+    if (capturing || impl_->solverWantsRedraw) {
+      // Do not block on input while producing a screenshot or while a solve is
+      // running: both need the next frame immediately, with or without input.
       glfwPollEvents();
     } else {
       // Blocks until something happens, so an idle window costs no CPU. The
@@ -589,7 +611,12 @@ int Application::run() {
     impl_->ui.lastFrameCpuMs = elapsed.count();
 
     ++frameIndex;
-    if (capturing && frameIndex >= impl_->screenshotAfterFrames) {
+    // When a solve is running, let it finish before capturing: a screenshot of
+    // the third iteration of a SIMPLE run shows nothing worth looking at.
+    constexpr long long kMaxSolveFrames = 20000;
+    const bool waitingOnSolver =
+        impl_->solverWantsRedraw && frameIndex < kMaxSolveFrames;
+    if (capturing && !waitingOnSolver && frameIndex >= impl_->screenshotAfterFrames) {
       // Read back before the swap, while the rendered image is still in the
       // back buffer we just drew into.
       if (const Status status = captureFramebuffer(impl_->window, impl_->screenshotPath);

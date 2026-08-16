@@ -5,6 +5,7 @@
 // a future batch-mode driver or test harness would also want to use.
 
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <memory>
 #include <span>
@@ -35,6 +36,8 @@ struct Options {
   std::string section;
   std::string meshResolution;
   bool initialiseFlow{false};
+  bool startSolver{false};
+  double reynoldsNumber{0.0};
   std::string fieldView;
 };
 
@@ -54,6 +57,8 @@ void printUsage() {
       "      --mesh LEVEL        Generate the mesh at startup:\n"
       "                          coarse, medium or fine\n"
       "      --flow              Initialise the flow at startup (implies --mesh)\n"
+      "      --solve             Start the solver running (implies --flow)\n"
+      "      --reynolds N        Reynolds number based on the chord\n"
       "      --field NAME        Shown scalar: velocity, vx, vy, pressure\n"
       "                          or divergence\n"
       "      --self-check        Run headless startup checks and exit\n"
@@ -91,6 +96,18 @@ cfd::Result<Options> parseArguments(std::span<const std::string_view> args) {
       }
       ++i;
       options.fieldView = std::string{args[i]};
+    } else if (arg == "--reynolds") {
+      if (i + 1 >= args.size()) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument, "--reynolds requires a value"};
+      }
+      ++i;
+      options.reynoldsNumber = std::strtod(std::string{args[i]}.c_str(), nullptr);
+      if (!(options.reynoldsNumber > 0.0)) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          "--reynolds must be a positive number"};
+      }
+    } else if (arg == "--solve") {
+      options.startSolver = true;
     } else if (arg == "--flow") {
       options.initialiseFlow = true;
     } else if (arg == "--mesh") {
@@ -222,6 +239,8 @@ int main(int argc, char** argv) {
     appOptions.initialMeshResolution = options.meshResolution;
     appOptions.initialiseFlow = options.initialiseFlow;
     appOptions.initialFieldView = options.fieldView;
+    appOptions.startSolver = options.startSolver;
+    appOptions.reynoldsNumber = options.reynoldsNumber;
 
     cfd::app::Application application;
     if (const cfd::Status status = application.initialize(appOptions); !status) {
