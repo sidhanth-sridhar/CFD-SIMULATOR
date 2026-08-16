@@ -3,23 +3,21 @@
 A 2D Reynolds-Averaged Navier-Stokes solver for NACA airfoil sections, with an
 interactive viewer.
 
-**Status: Phase 3 — flow state and boundary conditions. No equations are solved yet.**
+**Status: Phase 4 — laminar viscous Navier-Stokes solver. No turbulence model yet.**
 
 The application generates NACA four-digit sections, builds a structured C-grid
-around them, and initialises a flow field with boundary conditions applied.
-Type a designation such as `NACA 2412`, tick **Generate mesh**, then
-**Initialise flow**, and the domain appears with its conditions colour-coded
-and a shaded scalar field.
+around them, and solves the steady incompressible Navier-Stokes equations on
+them with a finite-volume SIMPLE algorithm. Type a designation such as
+`NACA 2412`, tick **Generate mesh**, then **Initialise flow**, then press
+**Run**.
 
-**Nothing is solved.** The flow field is a uniform freestream initialisation —
-an initial guess that satisfies the far field everywhere and the no-slip wall
-nowhere. Selecting the **Divergence** view shows exactly that: zero across the
-domain, non-zero only in the cells touching the surface. Removing that
-imbalance is what a solver will do, and there is no solver yet.
+The solver is **laminar**. There is no turbulence model, so results at the
+Reynolds numbers real aerofoils operate at (10⁶ and above) are not physically
+meaningful — a steady laminar solution does not exist there. That is what
+Phase 5 is for. At low Reynolds numbers the solver is validated against exact
+solutions to a fraction of a percent (see [Validation](#validation)).
 
-The geometry, mesh and field are verified against analytic results and against
-finite-volume identities (see [Validation](#validation)), but nothing here has
-been compared with wind-tunnel or reference CFD data.
+No comparison has been made with wind-tunnel data or another CFD code.
 
 ---
 
@@ -84,6 +82,8 @@ Add `--output-on-failure` to see diagnostics from failing tests.
 | `--mesh LEVEL` | Mesh at startup: `coarse`, `medium` or `fine` |
 | `--flow` | Initialise the flow at startup (implies a mesh) |
 | `--field NAME` | Shown scalar: `velocity`, `vx`, `vy`, `pressure`, `divergence` |
+| `--solve` | Start the solver running at startup (implies `--flow`) |
+| `--reynolds N` | Reynolds number based on the chord |
 | `--log-level LEVEL` | `trace`, `debug`, `info`, `warn`, `error`, `critical`, `off` |
 | `--self-check` | Headless subsystem check, then exit (this is what CTest runs) |
 | `--screenshot FILE` | Render a few frames, save the window as a BMP, exit |
@@ -182,6 +182,36 @@ divergence. Signed quantities use a diverging colour map centred on zero;
 unsigned ones use viridis. Both are perceptually uniform, and a rainbow map is
 deliberately avoided because it invents boundaries the data does not have.
 
+### Solving
+
+Press **Run** in the Solve panel. The solver iterates a few times per rendered
+frame, so the window stays responsive and the flow can be watched developing.
+**Step** advances one iteration; **Reset** returns to the initialised field.
+
+| Control | Meaning |
+|---|---|
+| Relax u / Relax p | Under-relaxation factors for momentum and pressure |
+| Convection | `Upwind` (robust, first-order) or `Second-order upwind` |
+| Iters/frame | Outer iterations per redraw |
+
+The convergence plot shows log₁₀ of the residuals. Residuals are the only
+honest measure of convergence: a field that stops changing while its residuals
+sit at 10⁻² has stalled, not converged. A run that hits the iteration limit
+says so and states plainly that the field shown is not a solution.
+
+**Under-relaxation.** SIMPLE deliberately drops a term when forming the
+pressure correction, so the correction it produces is too large and must be
+damped. The defaults (0.5 and 0.2) are more cautious than the textbook 0.7 and
+0.3, because the aerofoil C-grid — 75° of non-orthogonality, cells thousands of
+times longer than they are thick — diverges at the textbook values. The
+Cartesian validation cases use the faster pair.
+
+**What this solver is not.** It is steady and laminar. Pointed at an aerofoil
+at Re = 10⁶ it will iterate without converging, because no steady laminar
+solution exists there; real flow at that Reynolds number is turbulent. Use a
+low `--reynolds` for a physically meaningful laminar result until Phase 5 adds
+a turbulence model.
+
 ### Viewport controls
 
 | Input | Action |
@@ -206,6 +236,7 @@ CFD-SIMULATOR/
 │   ├── geom/                   Naca4, Airfoil
 │   ├── mesh/                   Mesh, CGrid
 │   ├── flow/                   Freestream, FlowField, BoundaryConditions
+│   ├── solver/                 LinearSystem, Gradient, SimpleSolver
 │   └── app/                    Application, Camera2D
 ├── src/
 │   ├── main.cpp                CLI parsing and startup
@@ -213,6 +244,7 @@ CFD-SIMULATOR/
 │   ├── geom/                   cfd_geometry — NACA equations and discretisation
 │   ├── mesh/                   cfd_mesh — domain, C-grid, finite-volume metrics
 │   ├── flow/                   cfd_flow — state, boundary conditions, divergence
+│   ├── solver/                 cfd_solver — discretisation, linear algebra, SIMPLE
 │   └── app/                    cfd_app — GLFW, OpenGL and Dear ImGui live here only
 └── tests/                      GoogleTest suite, registered with CTest
 ```
@@ -220,7 +252,7 @@ CFD-SIMULATOR/
 ### Module boundaries
 
 ```
-cfd_sim ──▶ cfd_app ──▶ cfd_flow ──▶ cfd_mesh ──▶ cfd_geometry ──▶ cfd_core ──▶ std
+cfd_sim ─▶ cfd_app ─▶ cfd_solver ─▶ cfd_flow ─▶ cfd_mesh ─▶ cfd_geometry ─▶ cfd_core
                 │
                 └──▶ Dear ImGui, GLFW, OpenGL
 ```
@@ -281,6 +313,26 @@ and the flux sign convention at once. With the no-slip wall switched back on
 the balance must fail, and only in the cells touching the wall — which is not a
 defect but the reason a solver is needed.
 
+### Solver validation
+
+The solver is checked against flows whose answers are known in closed form,
+which is what turns "does this look like a flow" into a number.
+
+| Case | What it tests | Result |
+|---|---|---|
+| Uniform flow | Consistency of convection, pressure gradient and boundary conditions | exact to 1×10⁻¹⁵ |
+| Couette | Diffusion and the no-slip wall, with convection identically zero | exact to 8×10⁻¹⁵ |
+| Poiseuille | Diffusion against a pressure gradient | profile within **0.06%**, dp/dx within **0.10%** of −8μu_max/H² |
+| Blasius flat plate | A real convection–diffusion balance | skin friction within **1.6–3.7%** of 0.664/√Re_x |
+
+Mass conservation is demonstrated throughout: the global imbalance closes to
+5×10⁻¹⁶ of the through-flow, and the maximum cell divergence falls to 10⁻¹¹.
+
+The C-grid case is guarded by a regression test that runs the solver on the
+aerofoil and requires the residuals to fall and the flow to stay physically
+plausible — that test exists because getting it stable forced two real fixes,
+recorded in `JOURNAL.md`.
+
 No comparison has been made against wind-tunnel data or another CFD code.
 
 ## Dependencies
@@ -297,11 +349,11 @@ reproduces the exact same sources or fails loudly.
 
 ## Roadmap
 
-Phases 0 to 3 are complete. Later phases build on them in order:
+Phases 0 to 4 are complete. Later phases build on them in order:
 
 1. ~~NACA 4-digit geometry generation~~ — done
 2. ~~Mesh generation around the section~~ — done
-3. Navier-Stokes discretisation — *state and boundary conditions in place; no equations solved*
+3. ~~Navier-Stokes discretisation~~ — done (laminar, SIMPLE)
 4. Reynolds averaging (RANS)
 5. k-ω SST turbulence closure
 6. Force and moment integration (lift, drag, moment coefficients)

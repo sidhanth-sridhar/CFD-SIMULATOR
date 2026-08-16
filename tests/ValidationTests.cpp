@@ -60,6 +60,19 @@ FlowField uniformField(const Mesh& mesh, Vec2 velocity, double density, double v
   return field;
 }
 
+/// Settings for the Cartesian validation cases.
+///
+/// The solver's defaults are deliberately cautious because the aerofoil C-grid
+/// needs them to be. These meshes are perfectly orthogonal boxes, so they can
+/// use the textbook relaxation pair and converge in roughly half the
+/// iterations.
+SimpleSettings cartesianSettings() {
+  SimpleSettings settings;
+  settings.velocityRelaxation = 0.7;
+  settings.pressureRelaxation = 0.3;
+  return settings;
+}
+
 /// Run to convergence, returning the last monitor. Fails the test if the
 /// residuals never come down.
 SolverMonitor converge(SimpleSolver& solver, int maxIterations, double tolerance) {
@@ -109,7 +122,7 @@ TEST(Validation, UniformFlowIsPreservedExactly) {
     }
   }
 
-  auto created = SimpleSolver::create(mesh, conditions, SimpleSettings{});
+  auto created = SimpleSolver::create(mesh, conditions, cartesianSettings());
   ASSERT_TRUE(created) << (created.hasError() ? created.error().format() : "");
   SimpleSolver& solver = created.value();
 
@@ -167,7 +180,7 @@ TEST(Validation, CouetteProfileIsLinear) {
     }
   }
 
-  auto created = SimpleSolver::create(mesh, conditions, SimpleSettings{});
+  auto created = SimpleSolver::create(mesh, conditions, cartesianSettings());
   ASSERT_TRUE(created);
   SimpleSolver& solver = created.value();
   ASSERT_TRUE(solver.initialise(uniformField(mesh, Vec2{0.5, 0.0}, 1.0, 0.05)));
@@ -229,7 +242,7 @@ TEST(Validation, PoiseuilleMatchesTheExactProfileAndPressureGradient) {
     }
   }
 
-  auto created = SimpleSolver::create(mesh, conditions, SimpleSettings{});
+  auto created = SimpleSolver::create(mesh, conditions, cartesianSettings());
   ASSERT_TRUE(created);
   SimpleSolver& solver = created.value();
   ASSERT_TRUE(solver.initialise(uniformField(mesh, Vec2{0.6, 0.0}, kDensity, kViscosity)));
@@ -313,7 +326,7 @@ TEST(Validation, FlatPlateMatchesTheBlasiusSkinFriction) {
     }
   }
 
-  SimpleSettings settings;
+  SimpleSettings settings = cartesianSettings();
   settings.scheme = ConvectionScheme::SecondOrderUpwind;
 
   auto created = SimpleSolver::create(mesh, conditions, settings);
@@ -393,7 +406,7 @@ TEST(Validation, ResidualsFallMonotonicallyAndMassIsConserved) {
     }
   }
 
-  auto created = SimpleSolver::create(mesh, conditions, SimpleSettings{});
+  auto created = SimpleSolver::create(mesh, conditions, cartesianSettings());
   ASSERT_TRUE(created);
   SimpleSolver& solver = created.value();
   ASSERT_TRUE(solver.initialise(uniformField(mesh, Vec2{1.0, 0.0}, 1.0, 0.02)));

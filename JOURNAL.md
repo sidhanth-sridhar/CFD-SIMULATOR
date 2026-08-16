@@ -1877,3 +1877,271 @@ only `--mesh` on its own means "show me the domain".
   little and are the difference between a tool and a demo.
 
 **Next:** Phase 4 — the Navier-Stokes discretisation, on explicit instruction.
+
+---
+
+# Phase 4 — Laminar Viscous Navier-Stokes Solver
+
+**Completed:** 2026-08-15
+**Outcome:** 190/190 tests pass. Poiseuille within 0.06% of exact, Blasius skin
+friction within 1.6–3.7% of the similarity solution, mass conserved to 5×10⁻¹⁶.
+
+## 1. Scope
+
+A working steady, incompressible, **laminar** Navier-Stokes solver, validated
+against exact solutions before being pointed at an aerofoil. No turbulence
+model — that is Phase 5.
+
+## 2. The equations, and the difficulty
+
+$$\nabla \cdot \mathbf{u} = 0$$
+$$\nabla \cdot (\rho\,\mathbf{u}\mathbf{u}) = -\nabla p + \nabla \cdot (\mu \nabla \mathbf{u})$$
+
+**Each term of the momentum equation**
+
+| Term | Meaning |
+|---|---|
+| $\nabla \cdot (\rho \mathbf{u}\mathbf{u})$ | convection — momentum carried along by the flow itself |
+| $-\nabla p$ | the pressure gradient pushing the fluid |
+| $\nabla \cdot (\mu \nabla \mathbf{u})$ | viscous diffusion — momentum spreading from fast fluid into slow |
+
+**The difficulty is that pressure has no equation.** Momentum tells you how to
+advance velocity *given* a pressure field. Continuity does not contain pressure
+at all — it is a constraint on velocity. So there is nothing to "solve for
+pressure", and the two are tangled: you need $p$ to get $\mathbf{u}$, and you
+need $\mathbf{u}$ to know whether $p$ was right.
+
+**SIMPLE** (Semi-Implicit Method for Pressure-Linked Equations) breaks the
+tangle by guessing and correcting:
+
+1. Solve momentum with a guessed pressure. The result satisfies momentum but
+   not continuity.
+2. Ask what pressure *correction* would remove the leftover mass imbalance.
+   Substituting that correction into momentum and then into continuity gives a
+   Poisson-like equation for it.
+3. Correct pressure, velocity and the face fluxes. Repeat.
+
+An outer iteration is not a time step — nothing physical happens between them.
+They walk towards the steady answer, which is why convergence is judged by
+residuals rather than by elapsed time.
+
+## 3. Discretisation choices
+
+**Conservative finite volume.** Everything is a face flux added to one cell and
+subtracted from its neighbour, so whatever leaves one cell enters the next by
+construction. Conservation is a property of the data structure, not something
+the numerics has to be careful about.
+
+**First-order upwind convection**, with second-order available. Upwind takes
+the face value from whichever cell is upstream: unconditionally stable, never
+overshoots, and only first-order — its error behaves like an extra diffusion
+aligned with the flow. The second-order scheme adds a deferred correction
+towards a central value, keeping the implicit part upwind so the matrix stays
+diagonally dominant while the *answer* converges to the more accurate scheme.
+
+**Over-relaxed non-orthogonal diffusion.** The face area vector is split as
+$\mathbf{S} = \mathbf{E} + \mathbf{T}$ with $\mathbf{E}$ along the line joining
+the two centroids. The $\mathbf{E}$ part is implicit; the leftover $\mathbf{T}$
+is a deferred correction from the previous iteration's gradient. Splitting this
+way keeps the implicit coefficient as large as possible, which is what keeps
+the matrix diagonally dominant on a skewed mesh.
+
+**Rhie-Chow interpolation.** Velocity and pressure both live at cell centres,
+which is what lets the mesh be unstructured. It also opens a notorious failure
+mode: a naive face interpolation makes each cell's pressure gradient depend
+only on its *second* neighbours, so a pressure field alternating cell by cell
+looks perfectly uniform to the discretisation and the solver happily returns a
+checkerboard. Rhie-Chow builds the face flux with a compact pressure difference
+across that face, restoring the coupling the interpolation lost.
+
+**Two linear solvers, because the two equations differ.** Diffusion
+contributes equally to both sides of a face, but upwind convection does not —
+it weights the upstream cell. Momentum is therefore asymmetric and gets
+Gauss-Seidel; the pressure equation is pure diffusion in disguise, symmetric
+and positive definite, and gets preconditioned conjugate gradient. Momentum is
+deliberately *not* solved tightly: the pressure is about to change anyway, so a
+few sweeps to smooth the field is both sufficient and faster.
+
+## 4. Validation
+
+Every case has a closed-form answer, which is what turns "does this look like a
+flow" into a number with an error bar.
+
+| Case | Isolates | Result |
+|---|---|---|
+| Uniform flow | consistency of convection, pressure gradient and BCs | exact to 1×10⁻¹⁵ |
+| Couette | diffusion and no-slip, convection identically zero | exact to 8×10⁻¹⁵ |
+| Poiseuille | diffusion against a pressure gradient | profile 0.06%, dp/dx 0.10% |
+| Blasius | a real convection–diffusion balance | cf within 1.6–3.7% |
+
+The uniform-flow case deserves a note: a uniform field *is* an exact solution,
+so any drift is a discretisation **inconsistency**, not an approximation error.
+It either holds to round-off or something is structurally wrong. It holds.
+
+For Blasius I integrated the similarity ODE with RK4 and checked
+$f'(4.91) = 0.9900$ before trusting it as a reference. Comparing against a
+correlation you have not verified is comparing against nothing.
+
+## 5. Problems encountered
+
+### 5.1 A 25% skin-friction error that was my test setup
+
+The first flat-plate runs gave cf 17–34% high. The error did not shrink with
+mesh refinement or with a taller domain, which ruled out discretisation and
+blockage and said "bug". The tell was that the freestream itself read
+**1.065 U** regardless of domain height — blockage at H = 2 would be 0.85%.
+
+It was not a solver bug. I had put the leading edge exactly at the inlet, where
+$u = U$ and $u = 0$ meet at a single point. That singularity corrupted the
+whole boundary layer. Adding a slip section ahead of the plate — standard
+practice, and something I should have done from the start — took the freestream
+to 1.0006 and cf to within 3.4%.
+
+**The lesson**: uniform flow and Couette were exact to 1e-15 and Poiseuille to
+0.06%, so the solver was demonstrably fine. I should have suspected the case
+before the code much earlier than I did.
+
+### 5.2 The wake cut had no pressure coupling
+
+The aerofoil C-grid diverged to NaN within twenty iterations. The wake cut is
+stored as two coincident boundary faces, and while their fluxes were counted in
+the mass balance, the pressure equation had no coefficient linking the cells on
+either side. Continuity across the cut was therefore unenforceable.
+
+Fixed by giving the discretisation one shared notion of "the cell on the far
+side of this face" — `oppositeCell` — which returns the neighbour for an
+ordinary face and the partner's owner for a cut, and by teaching the matrix
+product and Gauss-Seidel to follow it. The pair stays symmetric (so conjugate
+gradient still applies) because both faces compute an identical coefficient
+from mirrored geometry.
+
+### 5.3 A mesh defect from Phase 2, found by the solver
+
+That was not enough on its own. The blow-up started in a specific cell: the
+outermost cell of the trailing-edge column, out at the far-field boundary.
+
+In Phase 2 I had given the outer wake boundary the *same* x-distribution as the
+inner wake, so the grid lines in the wake would be exactly vertical. It looked
+tidy and it was a trap: the surface clustering near the trailing edge is about
+1e-4 chords, so the far-field cells inherited it and ended up 1e-4 wide and a
+whole chord tall — **aspect ratios of 10⁴ out where the flow is uniform and
+nothing needs resolving**. Those cells made the pressure equation violently
+stiff.
+
+Giving the outer boundary its own gentle distribution fixed it. The grid lines
+now shear instead of staying vertical, but only by the difference in x over the
+full domain height — a fraction of a percent.
+
+This is the most valuable thing that happened this phase: a mesh defect that
+looked harmless for two phases, and that only a solver could expose.
+
+### 5.4 Relaxation factors are mesh-dependent
+
+Even then, the C-grid diverged at the textbook 0.7/0.3. It converges at 0.5/0.2.
+That is not a defect — under-relaxation compensates for the term SIMPLE drops,
+and how much you need depends on how badly conditioned the mesh is. The
+defaults are now the cautious pair, because converging slowly is recoverable
+and diverging is not, and the Cartesian validation cases explicitly opt into
+the faster pair.
+
+### 5.5 A residual normalisation that divided by zero
+
+Uniform flow "failed to converge" while reporting residuals of 8×10⁻¹⁶. The
+normalisation was $\sum|a_P \phi_P|$, which for the y-momentum equation of a
+purely-x flow is *identically zero* — so round-off was being divided by
+nothing. Now normalised by $\sum|a_P|$ times a single velocity scale shared by
+both components, which cannot vanish and keeps the y residual meaningful in a
+flow that is predominantly in x.
+
+### 5.6 A gradient test that compared two zeros
+
+`Gradient.ConvergesForANonLinearField` used $x^2 + y^2$. On a Cartesian mesh
+the face-centre value of $x^2$ *is* its average over the face, so Green-Gauss
+is exact and the test compared two zeros. Replaced with a trigonometric field,
+which has a genuine truncation error, and the test now confirms second-order
+convergence.
+
+### 5.7 A stale colour range
+
+After the solver moved the field, the viewport still held the colour range
+computed for the *uniform* initialisation, so every solved value saturated and
+the pressure field rendered as garish wedges. It looked like a broken solution
+and was a stale legend. The range now refreshes wherever the field changes.
+
+## 6. Status
+
+**Verified by running it**
+
+- Clean configure, build and test; zero warnings with `-DCFD_WARNINGS_AS_ERRORS=ON`.
+- 190/190 tests pass in 18 s.
+- The four requested validation cases pass with the accuracies in §4.
+- Mass conservation: global imbalance 5×10⁻¹⁶, maximum cell divergence to 10⁻¹¹.
+- Residuals fall monotonically over hundreds of iterations and by more than six
+  orders of magnitude.
+- On the aerofoil at Re = 500 the solver produces a physically correct laminar
+  field: stagnation pressure peak at the leading edge, suction over the
+  thickest part, symmetric top-to-bottom for a symmetric section at zero
+  incidence, and no checkerboarding.
+
+**Not verified, and honest limitations**
+
+- **Laminar only.** At Re = 10⁶ the solver iterates without converging, because
+  no steady laminar solution exists there. That is physics, not a bug, and it
+  is what Phase 5 exists to fix — but it does mean the aerofoil cannot yet be
+  run at a realistic Reynolds number.
+- The aerofoil case at Re = 500 reached 2.4×10⁻⁴ after 5000 iterations rather
+  than full convergence. It is converging, slowly; the C-grid is stiff.
+- **No performance work.** ~31 ms per iteration on 8,658 cells. The pressure
+  solve dominates. Deliberately left alone.
+- No comparison with wind-tunnel data or another CFD code.
+- Only built and run on macOS 15.7 / arm64 / Apple Clang 17.
+
+## 7. What to understand before Phase 5
+
+1. **Where the eddy viscosity goes.** `FlowField::viscosity` is per cell and is
+   already used as the *effective* viscosity by the momentum assembly. A
+   turbulence model writes $\mu + \mu_t$ into it and the solver needs no
+   change.
+2. **Reynolds averaging introduces a closure problem.** Averaging the
+   Navier-Stokes equations leaves a term — the Reynolds stresses — with no
+   equation of its own. A turbulence model is a guess at that term, which is
+   why there are so many of them and why none is universally right.
+3. **Two more transport equations.** k-ω SST solves for turbulent kinetic
+   energy and specific dissipation rate. Both are convection-diffusion
+   equations with sources, so the assembly already written applies almost
+   unchanged.
+4. **The near-wall mesh now matters differently.** Turbulence models care about
+   $y^+$, the wall distance in viscous units. The first-layer height that was a
+   free choice for a laminar solve becomes a constraint.
+5. **The solver will get stiffer.** Eddy viscosity varies by orders of
+   magnitude across a boundary layer, and the source terms in the turbulence
+   equations are strongly non-linear. Expect to need lower relaxation again.
+
+## 8. What I learned
+
+- **A solver that passes a hard case can still be sunk by an easy mistake.**
+  Poiseuille matched to 0.06% and Blasius was 25% out, and the difference was
+  entirely in how I posed the flat plate. Exact-solution cases are worth
+  building precisely because they tell you *which* of the two is at fault.
+
+- **Downstream work is the best audit of upstream work.** The Phase 2 mesh
+  passed every geometric test I could think of — positive areas, no inversions,
+  Euler's formula, area against calculus — and still contained a defect that
+  made it useless for its actual purpose. Only running a solver on it revealed
+  that far-field cells with aspect ratio 10⁴ are not merely inelegant.
+
+- **Tidy is not the same as correct.** I gave the wake its vertical grid lines
+  because they looked right. Making them shear a fraction of a percent is
+  invisible and made the difference between diverging and converging.
+
+- **Read the numbers the failure gives you.** The freestream at 1.065 U when
+  blockage predicts 1.008 was the whole diagnosis; the fold in Phase 2 was
+  found the same way. Working out what a number *should* be before deciding
+  what is wrong has now saved more time than any other habit in this project.
+
+- **A test can be vacuous and still pass.** Comparing Green-Gauss against
+  $x^2 + y^2$ on a Cartesian mesh proved nothing at all, because the scheme is
+  exact there. A test that cannot fail is not a test.
+
+**Next:** Phase 5 — Reynolds averaging and the k-ω SST turbulence model, on
+explicit instruction.
