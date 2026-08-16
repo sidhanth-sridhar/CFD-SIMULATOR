@@ -2143,5 +2143,374 @@ and was a stale legend. The range now refreshes wherever the field changes.
   $x^2 + y^2$ on a Cartesian mesh proved nothing at all, because the scheme is
   exact there. A test that cannot fail is not a test.
 
-**Next:** Phase 5 — Reynolds averaging and the k-ω SST turbulence model, on
+**Next:** Phase 5 — the laminar solver pointed at an actual aerofoil, on
 explicit instruction.
+
+---
+
+# Phase 5 — Viscous Flow Around an Aerofoil
+
+**Completed:** 2026-08-15
+**Outcome:** 207/207 tests pass. Surface pressure, C<sub>p</sub>, wall shear,
+C<sub>f</sub> and near-wall velocity extracted from the solution; separation
+detected from the sign of the computed wall shear and confirmed to move forward
+with incidence (x/c = 0.69 at 8°, 0.39 at 12°, attached below 8°).
+
+## 1. Scope
+
+Run the laminar solver around a real NACA section and get the *wall* quantities
+out of it. Everything in Phase 4 was about the interior of the flow; this phase
+is about the thin layer where the fluid touches the aerofoil, because that is
+where lift, drag and stall are decided.
+
+Specifically: surface pressure and its coefficient, wall shear stress and its
+coefficient, surface velocity, a picture of the boundary layer, streamlines,
+and — the part with the sharpest requirement attached to it — **separation
+detected from the flow, never hard-coded**.
+
+## 2. What was implemented
+
+- `cfd_post`, a new module: post-processing that reads a solved field but never
+  writes to it.
+- `post::SurfaceDistribution` — ordered upper and lower surface stations, each
+  carrying position, arc length, x/c, tangent, normal, pressure, C<sub>p</sub>,
+  wall shear, C<sub>f</sub>, near-wall speed, and two flags.
+- `post::extractSurface` — walks the wall faces in contour order, splits them
+  into two surfaces, finds the stagnation point, and computes everything above.
+- Separation detection by sign change of the wall shear, with the crossing
+  interpolated between the two stations either side.
+- `post::traceStreamlines` — RK4 integration with a cell-walking point locator
+  that crosses the wake cut.
+- A Surface panel: the numbers, a C<sub>p</sub> plot with the conventional
+  inverted axis, a C<sub>f</sub> plot with a marked zero line, and the
+  separation station called out in words.
+- Viewport rendering: the section coloured by wall shear, separation ringed and
+  labelled, the stagnation point marked, streamlines drawn under the section.
+- `--alpha` and `--screenshot-frames` on the command line.
+- 17 new tests.
+
+## 3. The physics, term by term
+
+### Pressure coefficient
+
+**What it means.** A pressure reading in pascals tells you almost nothing on
+its own — it depends on the day's weather and how fast you were going.
+C<sub>p</sub> asks a better question: *how much of the flow's kinetic energy has
+been converted into pressure here?*
+
+$$C_p = \frac{p - p_\infty}{\tfrac{1}{2}\rho U_\infty^2}$$
+
+- $p - p_\infty$ — pressure relative to the undisturbed stream. Zero means
+  "nothing happened here".
+- $\tfrac{1}{2}\rho U_\infty^2$ — the **dynamic pressure** *q*, the pressure you
+  would get by bringing the freestream completely to rest.
+
+So C<sub>p</sub> = 1 means the flow has fully stagnated, and C<sub>p</sub> < 0
+means the fluid has been *accelerated* past freestream and its pressure has
+dropped below ambient. Suction, in other words, which is where most of an
+aerofoil's lift comes from.
+
+In inviscid flow C<sub>p</sub> = 1 is the hard ceiling. At Re = 500 the solver
+reports up to 1.22, and that is not an error: viscous dissipation adds to the
+pressure recovery, and at these Reynolds numbers the boundary layer is thick
+enough for the effect to be sizeable.
+
+### Wall shear stress
+
+**What it means.** Fluid sticks to a wall. The layer touching it does not move;
+a little way out it moves at nearly freestream speed. That difference in speed
+across a small distance is a velocity gradient, and viscosity turns a velocity
+gradient into a force. Wall shear stress is the drag force the fluid exerts on
+each square metre of the surface, along the surface.
+
+$$\tau_w = \mu \left.\frac{\partial u_t}{\partial n}\right|_{\text{wall}}$$
+
+- $\mu$ — dynamic viscosity: how strongly the fluid resists being sheared.
+- $u_t$ — the component of velocity **along** the surface. The normal component
+  is zero at a wall, so it carries no information.
+- $\partial/\partial n$ — the rate of change **into** the fluid, along the wall
+  normal.
+
+Discretely, with no-slip at the wall, the gradient over the first cell is just
+the wall-parallel velocity in that cell divided by its distance from the wall.
+That is first-order accurate, which is honest on a mesh whose first layer is
+10⁻³ of a chord.
+
+$$C_f = \frac{\tau_w}{\tfrac{1}{2}\rho U_\infty^2}$$
+
+### Why the sign of τ<sub>w</sub> is the whole story
+
+Under an adverse pressure gradient — pressure rising in the flow direction — the
+fluid nearest the wall is the slowest and therefore the first to run out of
+momentum. When it stops and reverses, the boundary layer lifts off the surface.
+That is separation.
+
+At the point of separation the near-wall flow is momentarily at rest, so
+
+$$\left.\frac{\partial u_t}{\partial n}\right|_{\text{wall}} = 0
+\quad\Longleftrightarrow\quad \tau_w = 0$$
+
+and downstream of it τ<sub>w</sub> < 0. This is why the requirement to detect
+separation from wall shear rather than hard-code it is not a stylistic
+preference: **τ<sub>w</sub> = 0 *is* the definition of separation.** Anything
+hard-coded would be a different quantity wearing the same name.
+
+## 4. The design decisions, and why they are decisions
+
+### The tangent is referenced to stagnation, not to the leading edge
+
+"Positive wall shear" is meaningless until you say positive in which direction.
+The obvious choice is to point the tangent from the leading edge towards the
+trailing edge along each surface. That is wrong, and it produced the first real
+bug of this phase.
+
+At 10° of incidence the stagnation point is not at the leading edge; it sits on
+the lower surface some way back. Between the leading edge and the stagnation
+point the fluid legitimately runs *forwards*, round the nose, from the
+high-pressure stagnation region towards the suction peak. Referenced to the
+leading edge, those stations have negative shear and get flagged as reversed —
+four of them did, and the code was reporting separation on the pressure side of
+an aerofoil at incidence, which does not happen.
+
+The fix is to define the tangent as pointing **away from the stagnation point**
+along each surface, which is the direction the fluid actually leaves from. The
+stagnation point is itself found from the solution, as the station of maximum
+surface pressure.
+
+```cpp
+const auto flowTangent = [&](std::size_t i) {
+  if (i == stagnation) {
+    return (i >= leadingEdge) ? wall[i].tangent : wall[i].tangent * -1.0;
+  }
+  return (i > stagnation) ? wall[i].tangent : wall[i].tangent * -1.0;
+};
+```
+
+The stations either side of stagnation are additionally flagged
+`nearStagnation` and excluded from the search, because at a point where the flow
+divides the sign of the shear genuinely has no meaning.
+
+### The surfaces split at the leading-edge *node*, not the leading-edge face
+
+First attempt: walk the wall faces, and start a new surface at the face whose
+centre has the smallest x. That gave 80 stations on one surface and 79 on the
+other, and a symmetric section at zero incidence failed its own mirror test.
+
+The reason is that the leading-edge *face* belongs to both surfaces at once, so
+whichever list claims it is offset from the other by half a cell. Splitting at
+the leading-edge **node** — the point shared by the two faces — gives both lists
+the same stations reflected. Symmetry then held to 2×10⁻⁶.
+
+### `oppositeCell` moved from the solver to the mesh
+
+The streamline tracer needs to walk across the wake cut, and so does the flux
+assembly, and so do the matrix-vector product and the Gauss-Seidel sweep. The
+function answering "which cell is on the other side of this face" is a statement
+about mesh connectivity, not about any one algorithm, so it now lives in
+`cfd::mesh` and the solver has a `using` declaration for it. Three callers
+sharing one definition beats three copies drifting apart.
+
+### Scaling the C<sub>f</sub> plot from x/c = 0.05
+
+Skin friction behaves like $1/\sqrt{x}$ near the leading edge — the boundary
+layer starts from zero thickness, so the gradient at the wall starts from
+infinity. Scaling the plot to that peak squashes the entire rest of the chord
+into two pixels and hides the zero crossing, which is the one feature the plot
+exists to show.
+
+The plot is therefore scaled from x/c = 0.05 outwards, points beyond the range
+are clamped to the frame rather than dropped, the caption says so, and the table
+above the plot always reports the true extremes. The same reasoning applies to
+the wall-shear colouring in the viewport, which uses the same cut-off.
+
+Hiding data would have been the wrong fix. Saying which data set the axis, and
+still reporting the rest, is not.
+
+## 5. Validation
+
+**Against constructed fields**, where the answer is known exactly: uniform
+pressure gives C<sub>p</sub> = (p − p∞)/q at every station (arranged with ρ = 2
+so that q = 1 and the identity is unmistakable); a linear wall-normal velocity
+profile gives exactly the wall shear its own gradient predicts; a reversed
+profile flags every station.
+
+**Against solved fields**, where the answer is known by symmetry or physics:
+
+| Case | Expected | Result |
+|---|---|---|
+| NACA 0012, α = 0° | mirror-image distributions, nothing separated | matched to 10⁻³, zero reversed stations |
+| NACA 0012, α = 10° | stagnation aft on the lower surface, suction side separates, pressure side does not | stagnation x/c = 0.005, separation upper only |
+
+The α = 0 tolerance is 10⁻³ rather than machine precision on purpose: the
+Gauss-Seidel sweeps run in index order, which is not a symmetric operation, so
+the converged field is symmetric to the solver's tolerance and not beyond it.
+
+**Sweeping incidence** on the coarse C-grid at Re = 500 is the check that
+matters most, because it tests a *trend* rather than a single number:
+
+| α | Upper-surface separation |
+|---|---|
+| 0°, 2°, 4°, 6° | attached |
+| 8° | x/c = 0.69 |
+| 12° | x/c = 0.39 |
+
+Separation moves forward as incidence increases, which is the behaviour that
+leads to stall, and nothing in the code knows that it should. The plotted
+C<sub>f</sub> crosses zero at the station the panel reports — the number and the
+picture agree, which is a genuinely independent check on both.
+
+## 6. The problem I did not solve
+
+At exactly zero incidence the continuity residual falls to a few times 10⁻⁴ and
+then **oscillates in a band instead of continuing down**, while both momentum
+residuals keep falling monotonically:
+
+```
+iteration  500: continuity 6.223e-04, momentum 1.255e-05 / 3.335e-06
+iteration 1500: continuity 5.298e-04, momentum 8.768e-06 / 3.377e-06
+iteration 2500: continuity 1.267e-03, momentum 6.923e-06 / 4.098e-06
+iteration 3500: continuity 6.092e-04, momentum 4.452e-06 / 2.594e-06
+iteration 5000: continuity 2.408e-04, momentum 2.105e-06 / 1.480e-06
+```
+
+Phase 4 recorded this as "converging, slowly". That was wrong, and the periodic
+progress log added this phase is what showed it: momentum is converging, mass
+conservation is in a limit cycle.
+
+**Ruled out:**
+
+- *Mesh resolution.* The medium grid (30,530 cells, 69.5° non-orthogonality)
+  behaves identically to the coarse one (8,658 cells, 79.9°).
+- *Non-orthogonal correction.* Raising `nonOrthogonalCorrectors` from 1 to 3
+  made it slightly worse, not better.
+- *A general solver defect.* Cases at incidence converge to 10⁻⁶ normally: α = 2°
+  in 3,322 iterations, 4° in 1,837, 8° in 1,208, 12° in 1,131. The difficulty
+  fades in rather than switching on — α = 0.5° reached 3.8×10⁻⁷ in continuity
+  and missed only on momentum.
+- *Physical unsteadiness.* At Re = 500 a 12% section at zero incidence has a
+  steady solution; vortex shedding from a streamlined body needs a far higher
+  Reynolds number.
+
+**Where the imbalance lives.** The divergence view at α = 0 after 5,000
+iterations shows a peak of 2.7×10⁻³ s⁻¹ against a freestream scale U/c = 50 s⁻¹
+— five parts in 10⁵ — spread thinly along the surface and through the wake
+rather than concentrated in a few cells.
+
+**Current best hypothesis**, untested: at α = 0 the flow is symmetric about the
+line the wake cut lies on, and the two cells either side of the cut hold mirror
+values. Gauss-Seidel visits them in index order, which is not symmetric, and the
+pressure conjugate-gradient will not remove an antisymmetric mode it sees as
+consistent. That would explain why the trouble is worst where the symmetry is
+exact and fades as incidence breaks it. Testing it means instrumenting the
+imbalance per boundary patch, which is the first thing to try next time.
+
+The fields at α = 0 are still symmetric, attached, checkerboard-free, and the
+band corresponds to a mass imbalance of 0.02–0.1% of the inflow. It is a
+convergence defect, not a wrong answer — but it is unresolved, and calling it
+anything else would be dishonest.
+
+## 7. Other problems encountered
+
+**Streamlines stopped at the wake cut.** The cell-walking locator followed
+`face.neighbour`, which is −1 on a cut face, so every curve entering the wake
+died there. Fixed by walking through `mesh::oppositeCell`. The accompanying test
+then failed for a different reason: it passed a hint on the far side of the
+aerofoil, and the walk — which follows a straight line towards the target —
+would have had to pass through solid section to get there. That is correct
+behaviour, not a bug, so the contract is now documented on the function: *a
+distant hint is worse than none*.
+
+**The stagnation face's own tangent flipped.** The face containing the
+stagnation point belongs to one surface but sits at the boundary of both, and
+resolving its sign by the general rule pointed it the wrong way for the surface
+that owned it. Resolved toward the owning surface.
+
+**The colour range went stale** (carried over from Phase 4's fix): anything that
+changes the field must refresh what depends on it. This phase added a second
+such dependency — the surface distributions — so `ui.surface.dirty` is now set
+in the same two places `refreshFieldRange` is called. The re-extraction happens
+every frame the solver advances, which meant the console filled with one
+identical separation line per frame; the log now reports only when the station
+appears, disappears, or moves by more than 0.005 c.
+
+**The screenshot harness lied to me once.** A long capture came back with the
+section reported as NACA 2412 when 0012 had been asked for, and another with the
+designation field reading "NACA 0" mid-edit. Neither reproduced. The window is
+real and takes real focus, so stray input events reach it; the code has exactly
+one writer to that buffer besides ImGui itself. Worth recording because ten
+minutes went into suspecting the option plumbing, which was innocent.
+
+## 8. Status
+
+**Verified by running it**
+
+- 207/207 tests pass. Zero warnings with `-DCFD_WARNINGS_AS_ERRORS=ON`.
+- NACA 0012 at Re = 500: α = 4° converges in 1,837 iterations, α = 8° in 1,208,
+  α = 12° in 1,131, all to a continuity residual below 10⁻⁶.
+- The boundary layer thickens along the chord, the wake persists downstream, the
+  stagnation point moves aft with incidence, and separation moves forward with
+  it — all read off the solution.
+- The plotted C<sub>f</sub> crosses zero at the station the separation detector
+  reports.
+
+**Not verified, and honest limitations**
+
+- Zero incidence does not converge in continuity (§6). Unresolved.
+- **Laminar only.** Re = 500 is three orders of magnitude below where real
+  aerofoils operate. Nothing here has been checked against a turbulent case,
+  because the solver cannot produce one.
+- **No forces yet.** C<sub>p</sub> and C<sub>f</sub> are computed but not
+  integrated, so there is still no lift or drag coefficient.
+- Wall shear uses a first-order one-sided difference. Adequate for the first
+  layer at 10⁻³ c; not a substitute for resolving the sublayer properly.
+- No comparison against wind-tunnel data or another CFD code.
+- Only built and run on macOS 15.7 / arm64 / Apple Clang 17.
+
+## 9. What to understand before the next phase
+
+1. **Forces are integrals of what this phase computed.** Lift and drag come from
+   integrating pressure and shear around the contour:
+   $$\mathbf{F} = \oint \left(-p\,\mathbf{n} + \boldsymbol{\tau}_w\right)\,\mathrm{d}s$$
+   The arc lengths, normals, tangents, pressures and shears in
+   `SurfaceDistribution` are exactly the terms of that integral, in order. The
+   next phase is mostly a loop.
+2. **Pressure drag and friction drag are different things.** The first comes
+   from the pressure integral and grows sharply once the flow separates; the
+   second comes from the shear integral. Reporting them separately is what makes
+   a drag number diagnostic rather than decorative.
+3. **The moment needs a reference point.** Aerodynamic moments are quoted about
+   the quarter-chord by convention, and a moment quoted without its reference
+   point is meaningless.
+4. **Separation is where the laminar assumption hurts most.** A real boundary
+   layer at high Reynolds number transitions to turbulence, which resists
+   separation far better than a laminar one. The separation stations computed
+   here are correct for the laminar equations being solved and would move
+   substantially aft with a turbulence model.
+
+## 10. What I learned
+
+- **"Positive" is a claim about a direction, and directions have to come from
+  the solution.** The four spurious reversed stations at 10° were not a numerics
+  bug; they were the code answering a well-posed question that I had asked
+  wrongly. Referencing the tangent to the geometric leading edge is a guess
+  about where the flow divides. Referencing it to the computed stagnation point
+  is not a guess, and it costs the same.
+
+- **Half a cell is enough to break a symmetry.** The leading-edge face belonging
+  to both surface lists shifted one of them by half a station, and a symmetric
+  section at zero incidence stopped being symmetric. Test the identity you know
+  must hold — the mirror test found this in a case where nothing looked wrong on
+  screen.
+
+- **A logged residual you never look at is not a diagnostic.** Phase 4 recorded
+  the α = 0 case as "converging, slowly" on the strength of a single number at
+  iteration 5,000. Ten lines of periodic logging showed it oscillating, which is
+  a completely different failure with a completely different cause. The cheapest
+  useful instrument is the one that shows a *trend*.
+
+- **Two independent views of the same quantity is a real test.** The separation
+  station is computed from an interpolated sign change; the C<sub>f</sub> plot is
+  drawn from the raw stations. They agree, and if they had not, one of them was
+  wrong in a way neither could have revealed alone.
+
+**Next:** force and moment integration, on explicit instruction.

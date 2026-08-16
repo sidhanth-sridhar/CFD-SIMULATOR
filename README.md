@@ -3,19 +3,26 @@
 A 2D Reynolds-Averaged Navier-Stokes solver for NACA airfoil sections, with an
 interactive viewer.
 
-**Status: Phase 4 — laminar viscous Navier-Stokes solver. No turbulence model yet.**
+**Status: Phase 5 — laminar viscous flow around an aerofoil, with surface
+pressure, skin friction and computed separation. No turbulence model yet.**
 
 The application generates NACA four-digit sections, builds a structured C-grid
-around them, and solves the steady incompressible Navier-Stokes equations on
-them with a finite-volume SIMPLE algorithm. Type a designation such as
-`NACA 2412`, tick **Generate mesh**, then **Initialise flow**, then press
-**Run**.
+around them, solves the steady incompressible Navier-Stokes equations on them
+with a finite-volume SIMPLE algorithm, and reads the wall quantities back off
+the solution: surface pressure, *C<sub>p</sub>*, wall shear stress,
+*C<sub>f</sub>*, near-wall velocity, and where the boundary layer separates.
+Type a designation such as `NACA 2412`, tick **Generate mesh**, then
+**Initialise flow**, then press **Run**.
+
+Separation is detected from the sign of the computed wall shear, never assumed
+or hard-coded. If the solution does not reverse, the application says the
+surface is attached.
 
 The solver is **laminar**. There is no turbulence model, so results at the
 Reynolds numbers real aerofoils operate at (10⁶ and above) are not physically
-meaningful — a steady laminar solution does not exist there. That is what
-Phase 5 is for. At low Reynolds numbers the solver is validated against exact
-solutions to a fraction of a percent (see [Validation](#validation)).
+meaningful — a steady laminar solution does not exist there. At low Reynolds
+numbers the solver is validated against exact solutions to a fraction of a
+percent (see [Validation](#validation)).
 
 No comparison has been made with wind-tunnel data or another CFD code.
 
@@ -84,9 +91,11 @@ Add `--output-on-failure` to see diagnostics from failing tests.
 | `--field NAME` | Shown scalar: `velocity`, `vx`, `vy`, `pressure`, `divergence` |
 | `--solve` | Start the solver running at startup (implies `--flow`) |
 | `--reynolds N` | Reynolds number based on the chord |
+| `--alpha DEG` | Angle of attack in degrees |
 | `--log-level LEVEL` | `trace`, `debug`, `info`, `warn`, `error`, `critical`, `off` |
 | `--self-check` | Headless subsystem check, then exit (this is what CTest runs) |
 | `--screenshot FILE` | Render a few frames, save the window as a BMP, exit |
+| `--screenshot-frames N` | Frames to render first (default 3); a large value with `--solve` captures a converged run |
 
 ### Generating a section
 
@@ -209,8 +218,44 @@ Cartesian validation cases use the faster pair.
 **What this solver is not.** It is steady and laminar. Pointed at an aerofoil
 at Re = 10⁶ it will iterate without converging, because no steady laminar
 solution exists there; real flow at that Reynolds number is turbulent. Use a
-low `--reynolds` for a physically meaningful laminar result until Phase 5 adds
-a turbulence model.
+low `--reynolds` for a physically meaningful laminar result until a turbulence
+model is added.
+
+### Surface results
+
+Once a flow exists, the **Surface** panel reads the wall quantities straight
+off the field. Nothing here is fitted, assumed or hard-coded.
+
+| Quantity | Definition | How it is obtained |
+|---|---|---|
+| Surface pressure | *p* at the wall, Pa | the adjacent cell's pressure, extrapolated along the face normal |
+| Pressure coefficient | *C<sub>p</sub>* = (*p* − *p*<sub>∞</sub>) / ½ρ*U*∞² | from the above |
+| Wall shear stress | *τ*<sub>w</sub> = *μ* ∂*u*<sub>t</sub>/∂*n* | wall-parallel velocity in the first cell, over the wall distance |
+| Skin friction | *C<sub>f</sub>* = *τ*<sub>w</sub> / ½ρ*U*∞² | from the above |
+| Near-wall speed | \|**u**\| in the first cell | directly |
+
+The two plots are drawn in the conventional way: *C<sub>p</sub>* with an
+inverted vertical axis so suction points upwards, *C<sub>f</sub>* with a marked
+zero line, both against *x/c*, upper surface in blue and lower in orange.
+*C<sub>f</sub>* is scaled from *x/c* = 0.05 outwards, because skin friction is
+singular where the boundary layer starts and scaling to that peak would flatten
+the whole rest of the chord; the panel's table always reports the true extremes.
+
+**Separation** is *found*, not assumed. Wall shear is signed along the surface
+tangent, and the tangent is referenced to the computed stagnation point rather
+than to the geometric leading edge — upstream of stagnation the fluid genuinely
+runs forward, and calling that "reversed" would report separation where there
+is none. A station is separated where the sign flips from positive to negative;
+the location is interpolated between the two stations either side. If the
+solution does not reverse, the panel says the surface is attached.
+
+In the viewport, the section is coloured by wall shear — green where the
+near-wall flow still runs downstream, red where it has reversed, brighter with
+larger magnitude — with the separation point ringed and labelled and the
+stagnation point marked. **Streamlines** can be traced through the field by
+RK4 integration, seeded from a rake upstream of the section; they are the
+clearest picture of a separated region, and they cross the wake cut correctly
+because the tracer walks the mesh through the cut's face pairs.
 
 ### Viewport controls
 
@@ -237,6 +282,7 @@ CFD-SIMULATOR/
 │   ├── mesh/                   Mesh, CGrid
 │   ├── flow/                   Freestream, FlowField, BoundaryConditions
 │   ├── solver/                 LinearSystem, Gradient, SimpleSolver
+│   ├── post/                   SurfaceData, Streamlines
 │   └── app/                    Application, Camera2D
 ├── src/
 │   ├── main.cpp                CLI parsing and startup
@@ -245,6 +291,7 @@ CFD-SIMULATOR/
 │   ├── mesh/                   cfd_mesh — domain, C-grid, finite-volume metrics
 │   ├── flow/                   cfd_flow — state, boundary conditions, divergence
 │   ├── solver/                 cfd_solver — discretisation, linear algebra, SIMPLE
+│   ├── post/                   cfd_post — surface quantities, separation, streamlines
 │   └── app/                    cfd_app — GLFW, OpenGL and Dear ImGui live here only
 └── tests/                      GoogleTest suite, registered with CTest
 ```
@@ -253,6 +300,8 @@ CFD-SIMULATOR/
 
 ```
 cfd_sim ─▶ cfd_app ─▶ cfd_solver ─▶ cfd_flow ─▶ cfd_mesh ─▶ cfd_geometry ─▶ cfd_core
+                │                      ▲
+                ├──▶ cfd_post ─────────┘
                 │
                 └──▶ Dear ImGui, GLFW, OpenGL
 ```
@@ -333,7 +382,51 @@ aerofoil and requires the residuals to fall and the flow to stay physically
 plausible — that test exists because getting it stable forced two real fixes,
 recorded in `JOURNAL.md`.
 
+### Surface and separation validation
+
+Surface extraction is checked two ways. Against constructed fields, where the
+answer is known exactly: a uniform pressure gives *C<sub>p</sub>* = (p − p∞)/q
+at every station, a linear wall-normal velocity profile gives the wall shear
+its own analytic gradient predicts, and a reversed profile flags every station
+as reversed. And against solved fields, where the answer is known by symmetry
+or by physics:
+
+| Case | Expected | Result |
+|---|---|---|
+| NACA 0012, α = 0° | Upper and lower distributions are mirror images; nothing separates | matched to 10⁻³; zero reversed stations |
+| NACA 0012, α = 10° | Stagnation moves aft along the lower surface; the suction side separates and the pressure side does not | stagnation at x/c = 0.005, separation on the upper surface only |
+
+Run at Re = 500 on the coarse C-grid, separation moves forward as incidence
+increases, which is the behaviour that matters:
+
+| Incidence | Upper-surface separation |
+|---|---|
+| 0°, 2°, 4°, 6° | attached |
+| 8° | x/c = 0.69 |
+| 12° | x/c = 0.39 |
+
+None of that is imposed anywhere; it falls out of the sign of the computed wall
+shear. The plotted *C<sub>f</sub>* crosses zero at the same station the panel
+reports, which is the check that the number and the picture agree.
+
 No comparison has been made against wind-tunnel data or another CFD code.
+
+### Known limitation: zero incidence converges poorly
+
+At exactly α = 0 the continuity residual falls to a few times 10⁻⁴ and then
+oscillates in a band rather than continuing down, while both momentum residuals
+keep falling monotonically. It is not resolution: coarse and medium meshes
+behave the same way. It is not the non-orthogonal correction: raising the
+corrector count from 1 to 3 does not help. Cases at incidence converge normally
+— α = 2° in 3,322 iterations, α = 4° in 1,837, α = 8° in 1,208, α = 12° in
+1,131, all to 10⁻⁶ — and the trouble fades in rather than switching on: α = 0.5°
+reached 3.8×10⁻⁷ in continuity and missed the tolerance only on momentum, at
+1.5×10⁻⁶.
+
+The fields produced at α = 0 are still symmetric, attached and free of
+checkerboarding, and the residual band corresponds to a mass imbalance of
+around 0.02–0.1% of the inflow. It is a convergence defect, not a wrong answer,
+and it is unresolved. `JOURNAL.md` §6 records what was ruled out.
 
 ## Dependencies
 
@@ -349,15 +442,15 @@ reproduces the exact same sources or fails loudly.
 
 ## Roadmap
 
-Phases 0 to 4 are complete. Later phases build on them in order:
+Phases 0 to 5 are complete. Later phases build on them in order:
 
 1. ~~NACA 4-digit geometry generation~~ — done
 2. ~~Mesh generation around the section~~ — done
 3. ~~Navier-Stokes discretisation~~ — done (laminar, SIMPLE)
-4. Reynolds averaging (RANS)
-5. k-ω SST turbulence closure
-6. Force and moment integration (lift, drag, moment coefficients)
-7. Boundary-layer separation detection
+4. ~~Viscous flow around an aerofoil: Cp, Cf, wall shear, separation~~ — done
+5. Force and moment integration (lift, drag, moment coefficients)
+6. Reynolds averaging (RANS)
+7. k-ω SST turbulence closure
 8. Vortex structures and stall behaviour
 
 ## Documentation
