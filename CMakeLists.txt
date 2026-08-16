@@ -79,6 +79,7 @@ add_subdirectory(src/geom)
 add_subdirectory(src/mesh)
 add_subdirectory(src/flow)
 add_subdirectory(src/solver)
+add_subdirectory(src/post)
 
 if(CFD_BUILD_APP)
   add_subdirectory(src/app)

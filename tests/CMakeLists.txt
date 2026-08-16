@@ -21,6 +21,7 @@ add_executable(cfd_tests
     MeshTests.cpp
     Naca4Tests.cpp
     SolverTests.cpp
+    SurfaceDataTests.cpp
     ValidationTests.cpp)
 
 # cfd::solver carries flow, mesh, geometry and core PUBLICly, so naming those
@@ -28,6 +29,7 @@ add_executable(cfd_tests
 target_link_libraries(cfd_tests
     PRIVATE
         cfd::solver
+        cfd::post
         cfd::warnings
         GTest::gtest_main)
 

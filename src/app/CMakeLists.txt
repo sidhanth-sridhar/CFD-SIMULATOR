@@ -45,6 +45,7 @@ target_link_libraries(cfd_app
         cfd::core
     PRIVATE
         cfd::solver
+        cfd::post
         imgui::imgui
         glfw
         OpenGL::GL
