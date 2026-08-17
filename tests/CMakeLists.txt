@@ -16,6 +16,7 @@ add_executable(cfd_tests
     CGridTests.cpp
     Camera2DTests.cpp
     ErrorTests.cpp
+    ForceTests.cpp
     FlowFieldTests.cpp
     LogTests.cpp
     MeshTests.cpp

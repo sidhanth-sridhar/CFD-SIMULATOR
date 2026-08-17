@@ -5,6 +5,7 @@
 # solver means post-processing can be run on a field loaded from anywhere.
 
 add_library(cfd_post STATIC
+    Forces.cpp
     Streamlines.cpp
     SurfaceData.cpp)
 

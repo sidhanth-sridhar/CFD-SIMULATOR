@@ -66,6 +66,7 @@ SurfacePoint evaluate(const mesh::Mesh& mesh, const flow::FlowField& field,
   point.position = wall.centre;
   point.tangent = tangent;
   point.normal = wall.normal;
+  point.segmentLength = wall.length;
   point.chordFraction = (chord > 0.0) ? wall.centre.x / chord : wall.centre.x;
 
   point.pressure = field.pressure[wall.owner];

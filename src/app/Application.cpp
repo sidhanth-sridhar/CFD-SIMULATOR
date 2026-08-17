@@ -295,6 +295,7 @@ void Application::Impl::layoutAndDrawPanels() {
       drawFlowPanel(ui);
       drawSolverPanel(ui);
       drawSurfacePanel(ui);
+      drawForcePanel(ui);
       drawSessionPanel(ui);
     }
     ImGui::End();

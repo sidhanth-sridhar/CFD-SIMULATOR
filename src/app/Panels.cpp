@@ -1082,6 +1082,13 @@ void updateFlow(UiState& ui) {
   // surface quantities are read from it, so they have to be taken again.
   ui.solving.dirty = true;
   ui.surface.dirty = true;
+  if (!continued) {
+    // A cold start is a new run, so the coefficient traces start again with it.
+    // A continued one keeps its history: that is the same run carrying on, and
+    // seeing the coefficients move to their new values is the point of it.
+    ui.surface.liftHistory.clear();
+    ui.surface.dragHistory.clear();
+  }
   if (resume) {
     ui.solving.running = true;
   }
@@ -1211,6 +1218,7 @@ void updateSurface(UiState& ui) {
   state.dirty = false;
 
   state.distribution.reset();
+  state.forces.reset();
   state.upperX.clear();
   state.upperCp.clear();
   state.upperCf.clear();
@@ -1247,6 +1255,29 @@ void updateSurface(UiState& ui) {
   };
   fill(state.distribution->upper, state.upperX, state.upperCp, state.upperCf);
   fill(state.distribution->lower, state.lowerX, state.lowerCp, state.lowerCf);
+
+  // Forces come straight off the distribution that was just extracted, so the
+  // coefficients and the plots above them can never be one step out of step.
+  const Vec2 reference{state.momentReferenceFraction * chord, 0.0};
+  Result<post::AerodynamicForces> integrated =
+      post::integrateForces(*state.distribution, ui.flow.freestream, reference);
+  if (integrated) {
+    state.forces = std::move(integrated).value();
+
+    // Bounded history: the sparkline only has a couple of hundred pixels, and
+    // an unbounded vector on a long run is a leak by another name.
+    constexpr std::size_t kMaxHistory = 4000;
+    state.liftHistory.push_back(static_cast<float>(state.forces->liftCoefficient));
+    state.dragHistory.push_back(static_cast<float>(state.forces->dragCoefficient));
+    if (state.liftHistory.size() > kMaxHistory) {
+      state.liftHistory.erase(state.liftHistory.begin(),
+                              state.liftHistory.begin() +
+                                  static_cast<std::ptrdiff_t>(kMaxHistory / 4));
+      state.dragHistory.erase(state.dragHistory.begin(),
+                              state.dragHistory.begin() +
+                                  static_cast<std::ptrdiff_t>(kMaxHistory / 4));
+    }
+  }
 
   // Streamlines are the expensive part of this function by a wide margin, so
   // they are refreshed on their own schedule: always when the solve is not
@@ -1312,6 +1343,23 @@ void updateSurface(UiState& ui) {
   };
   report("upper", surface.upperSeparation, state.reportedUpperSeparation);
   report("lower", surface.lowerSeparation, state.reportedLowerSeparation);
+
+  // A finished run states its answer. This is the number the whole pipeline
+  // exists to produce, and it should not only live in a panel that may not be
+  // on screen.
+  const bool settled = ui.solving.converged || ui.solving.hitIterationLimit;
+  if (settled && state.forces.has_value() &&
+      state.forcesReportedAt != ui.solving.iteration) {
+    const post::AerodynamicForces& forces = *state.forces;
+    CFD_LOG_INFO(kLogCategory,
+                 "forces at {:.2f} deg: Cl {:+.5f}, Cd {:+.5f} (pressure {:+.5f}, "
+                 "friction {:+.5f}), Cm {:+.5f} about {:.3f} c, L/D {:.3f}",
+                 forces.angleOfAttackDeg, forces.liftCoefficient, forces.dragCoefficient,
+                 forces.pressureDragCoefficient, forces.frictionDragCoefficient,
+                 forces.momentCoefficient, state.momentReferenceFraction,
+                 forces.hasLiftToDrag() ? forces.liftToDrag() : 0.0);
+    state.forcesReportedAt = ui.solving.iteration;
+  }
 }
 
 void fitDomain(UiState& ui) {
@@ -1743,6 +1791,10 @@ void drawMeshPanel(UiState& ui) {
 /// Span of the incidence slider, in degrees.
 constexpr double kIncidenceSliderMin = -20.0;
 constexpr double kIncidenceSliderMax = 20.0;
+
+/// Range the pitching-moment reference may be placed over, in chords.
+constexpr double kMomentReferenceMin = 0.0;
+constexpr double kMomentReferenceMax = 1.0;
 
 void drawFlowPanel(UiState& ui) {
   FlowState& state = ui.flow;
@@ -2443,6 +2495,91 @@ void drawSurfacePanel(UiState& ui) {
   ImGui::TextColored(theme::kSurfaceLower, "lower");
   ImGui::SameLine();
   ImGui::TextColored(theme::kTextDisabled, " - x/c runs left to right");
+}
+
+void drawForcePanel(UiState& ui) {
+  SurfaceState& state = ui.surface;
+
+  if (!ImGui::CollapsingHeader("Forces", ImGuiTreeNodeFlags_DefaultOpen)) {
+    return;
+  }
+  if (!state.forces.has_value()) {
+    ImGui::TextColored(theme::kTextDisabled,
+                       "Needs a surface solution to integrate.");
+    return;
+  }
+  const post::AerodynamicForces& forces = *state.forces;
+
+  // The four headline numbers, in the largest type the panel uses. These are
+  // what the whole pipeline exists to produce.
+  if (beginInfoTable("force_coefficients", 104.0f)) {
+    infoRow(ui, "Cl", std::format("{:+.5f}", forces.liftCoefficient));
+    infoRow(ui, "Cd", std::format("{:+.5f}", forces.dragCoefficient));
+    infoRow(ui, "Cm", std::format("{:+.5f}", forces.momentCoefficient));
+    infoRow(ui, "L/D", forces.hasLiftToDrag()
+                          ? std::format("{:+.3f}", forces.liftToDrag())
+                          : std::string{"-"});
+    ImGui::EndTable();
+  }
+
+  ImGui::Spacing();
+  ImGui::SeparatorText("Breakdown");
+  // Where the drag comes from is the single most diagnostic thing here: form
+  // drag climbing away from friction drag is what separation looks like in a
+  // number.
+  if (beginInfoTable("force_breakdown", 104.0f)) {
+    infoRow(ui, "Cd pressure", std::format("{:+.5f}", forces.pressureDragCoefficient));
+    infoRow(ui, "Cd friction", std::format("{:+.5f}", forces.frictionDragCoefficient));
+    infoRow(ui, "Lift", std::format("{:+.5g} N/m", forces.lift));
+    infoRow(ui, "Drag", std::format("{:+.5g} N/m", forces.drag));
+    infoRow(ui, "Moment", std::format("{:+.5g} N", forces.pitchingMoment));
+    infoRow(ui, "Stations", std::format("{}", forces.stations));
+    ImGui::EndTable();
+  }
+
+  ImGui::Spacing();
+  if (beginInfoTable("force_reference", 104.0f)) {
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::TextColored(theme::kTextDim, "Moment at");
+    ImGui::TableSetColumnIndex(1);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::SliderScalar("##momentref", ImGuiDataType_Double,
+                            &state.momentReferenceFraction, &kMomentReferenceMin,
+                            &kMomentReferenceMax, "%.3f x/c")) {
+      state.momentReferenceFraction =
+          std::clamp(state.momentReferenceFraction, 0.0, 1.0);
+      state.dirty = true;
+    }
+    infoRow(ui, "Alpha", std::format("{:+.2f} deg", forces.angleOfAttackDeg));
+    infoRow(ui, "q", std::format("{:.5g} Pa", forces.dynamicPressure));
+    ImGui::EndTable();
+  }
+
+  ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDisabled);
+  ImGui::TextWrapped(
+      "Integrated around the surface as -p n + tau_w t. Cm is nose-up positive. "
+      "Forces are per metre of span, so the reference area is the chord.");
+  ImGui::PopStyleColor();
+
+  if (!state.showForcePlots || state.liftHistory.size() < 2) {
+    ImGui::Checkbox("Convergence", &state.showForcePlots);
+    return;
+  }
+
+  // Traces against extraction number rather than iteration, since that is when
+  // a coefficient was actually produced. A force still drifting once the
+  // residuals have flattened has not converged, whatever the residuals say.
+  ImGui::Spacing();
+  ImGui::PlotLines("##cl", state.liftHistory.data(),
+                   static_cast<int>(state.liftHistory.size()), 0,
+                   std::format("Cl  {:+.4f}", state.liftHistory.back()).c_str(),
+                   FLT_MAX, FLT_MAX, ImVec2(-FLT_MIN, 52.0f));
+  ImGui::PlotLines("##cd", state.dragHistory.data(),
+                   static_cast<int>(state.dragHistory.size()), 0,
+                   std::format("Cd  {:+.4f}", state.dragHistory.back()).c_str(),
+                   FLT_MAX, FLT_MAX, ImVec2(-FLT_MIN, 52.0f));
+  ImGui::Checkbox("Convergence", &state.showForcePlots);
 }
 
 void drawSessionPanel(UiState& ui) {

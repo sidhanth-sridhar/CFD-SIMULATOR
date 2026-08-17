@@ -71,6 +71,14 @@ struct SurfacePoint {
   /// Unit normal, pointing away from the wall into the fluid.
   Vec2 normal{};
 
+  /// Length of the wall face this station stands for, in metres.
+  ///
+  /// The element of surface the station is responsible for. Integrating forces
+  /// with these rather than with differences of arc length keeps the integral
+  /// on exactly the same discrete surface the solver imposed its wall
+  /// condition on, so a closed contour closes to round-off.
+  double segmentLength{0.0};
+
   double pressure{0.0};             ///< Pa, gauge
   double pressureCoefficient{0.0};  ///< Cp
 

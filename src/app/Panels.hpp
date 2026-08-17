@@ -32,6 +32,7 @@
 #include "cfd/flow/Freestream.hpp"
 #include "cfd/mesh/CGrid.hpp"
 #include "cfd/mesh/Mesh.hpp"
+#include "cfd/post/Forces.hpp"
 #include "cfd/post/Streamlines.hpp"
 #include "cfd/post/SurfaceData.hpp"
 #include "cfd/solver/SimpleSolver.hpp"
@@ -301,6 +302,31 @@ struct SurfaceState {
   std::optional<post::SurfaceDistribution> distribution;
   std::vector<post::Streamline> streamlines;
 
+  /// Integrated from the distribution above, so it is exactly as current as
+  /// the surface is - there is no second path by which a coefficient could be
+  /// shown next to a Cp plot it does not belong to.
+  std::optional<post::AerodynamicForces> forces;
+
+  /// Where the pitching moment is taken about, as a fraction of chord. The
+  /// quarter chord by convention: for a thin section in attached flow the
+  /// aerodynamic centre sits very close to it, which makes the moment about it
+  /// nearly independent of incidence.
+  double momentReferenceFraction{0.25};
+
+  /// Coefficient history, one entry per extraction, for the convergence
+  /// sparklines. A force that is still moving when the residuals have stopped
+  /// is not a converged force, and only a trace shows that.
+  std::vector<float> liftHistory;
+  std::vector<float> dragHistory;
+  bool showForcePlots{true};
+
+  /// Iteration whose coefficients were last written to the log, or -1.
+  ///
+  /// A run that finishes should say what it found, once. Without this it would
+  /// either repeat the line on every frame after convergence or never print it
+  /// at all.
+  long long forcesReportedAt{-1};
+
   /// Plot-ready copies, built once when the distribution changes rather than
   /// rebuilt every frame.
   std::vector<float> upperX;
@@ -432,6 +458,7 @@ void drawMeshPanel(UiState& ui);
 void drawFlowPanel(UiState& ui);
 void drawSolverPanel(UiState& ui);
 void drawSurfacePanel(UiState& ui);
+void drawForcePanel(UiState& ui);
 void drawSessionPanel(UiState& ui);
 void drawViewport(UiState& ui);
 void drawConsole(UiState& ui);
