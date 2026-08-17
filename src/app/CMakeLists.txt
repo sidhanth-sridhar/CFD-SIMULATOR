@@ -12,6 +12,7 @@ find_package(OpenGL REQUIRED)
 add_library(cfd_app STATIC
     Application.cpp
     Panels.cpp
+    SolverWorker.cpp
     Theme.cpp)
 
 # Trackpad pinch is not a GLFW concept, so it needs the native window. On macOS
@@ -40,10 +41,15 @@ target_include_directories(cfd_app
 # the viewport draws sections, grids and fields and the panel drives a solve,
 # but Application.hpp exposes nothing from those modules, so callers do not
 # inherit them.
+# The solver runs on a thread of its own so the window stays responsive; on
+# some toolchains std::thread needs the platform threading library named.
+find_package(Threads REQUIRED)
+
 target_link_libraries(cfd_app
     PUBLIC
         cfd::core
     PRIVATE
+        Threads::Threads
         cfd::solver
         cfd::post
         imgui::imgui

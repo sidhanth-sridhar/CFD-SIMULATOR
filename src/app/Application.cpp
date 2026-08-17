@@ -590,11 +590,33 @@ int Application::run() {
   float statsWorstMs = 0.0f;
   long long statsFrames = 0;
 
+  // Ceiling on redraws while a solve is running. The solver has a thread of its
+  // own now, so redrawing faster than this buys nothing at all: it cannot make
+  // the answer arrive sooner, it cannot show more than the display refreshes,
+  // and every frame spent on it is a core taken away from the solve. Vsync
+  // would normally impose a similar limit, but it is not imposed when the
+  // window is hidden or occluded - which is exactly when spinning is most
+  // wasteful and least visible.
+  constexpr double kSolveFrameSeconds = 1.0 / 60.0;
+  // Measured from the start of the previous frame, so the interval covers the
+  // frame's own cost rather than being added on top of it.
+  auto lastFrameStart = std::chrono::steady_clock::now();
+
   while (glfwWindowShouldClose(impl_->window) == 0) {
     if (capturing || impl_->solverWantsRedraw) {
-      // Do not block on input while producing a screenshot or while a solve is
-      // running: both need the next frame immediately, with or without input.
-      glfwPollEvents();
+      // Never block waiting for input: a solve needs the next frame with or
+      // without it. Waiting out the remainder of the frame interval still
+      // returns early the moment input arrives, so this costs no
+      // responsiveness - it only stops the loop free-running.
+      const double sinceLastFrame =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - lastFrameStart)
+              .count();
+      const double remaining = kSolveFrameSeconds - sinceLastFrame;
+      if (remaining > 0.0) {
+        glfwWaitEventsTimeout(remaining);
+      } else {
+        glfwPollEvents();
+      }
     } else {
       // Blocks until something happens, so an idle window costs no CPU. The
       // timeout bounds the wait so anything time-based still updates.
@@ -602,6 +624,7 @@ int Application::run() {
     }
 
     const auto frameStart = std::chrono::steady_clock::now();
+    lastFrameStart = frameStart;
 
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();

@@ -14,11 +14,13 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "SolverWorker.hpp"
 #include "Theme.hpp"
 #include "cfd/app/Camera2D.hpp"
 #include "cfd/core/Log.hpp"
@@ -91,9 +93,18 @@ struct MeshState {
   /// Seeded from the resolution preset, then editable.
   double firstLayerHeight{3.0e-4};
 
-  std::optional<mesh::Mesh> mesh;
+  /// Shared, and const, because the solver runs on its own thread and holds a
+  /// reference to the grid it was built on. Regenerating the mesh here swaps
+  /// this pointer; the worker's copy keeps the old grid alive for exactly as
+  /// long as it is still reading from it. A bare optional would leave the
+  /// worker pointing at freed memory the moment a resolution changed.
+  std::shared_ptr<const mesh::Mesh> mesh;
   std::string errorMessage;
   bool dirty{true};
+
+  /// Bumped on every successful regeneration. Cheap for view caches to compare
+  /// against, and unlike the pointer it never repeats after a reallocation.
+  std::uint64_t revision{0};
 
   /// Wall-clock cost of the last successful generation.
   double lastGenerationMs{0.0};
@@ -197,15 +208,20 @@ struct FlowState {
 
 /// The solver, its controls and its convergence history.
 struct SolverState {
-  /// Rebuilt whenever the mesh, the flow or the settings change. Holds a
-  /// pointer to the mesh, so it must not outlive one.
-  std::optional<solver::SimpleSolver> engine;
+  /// The solver itself lives on the worker's thread, not here. Rebuilt and
+  /// re-adopted whenever the mesh, the flow or the settings change.
+  SolverWorker worker;
   solver::SimpleSettings settings;
 
+  /// Mirrors the worker, which is the authority: it stops itself on
+  /// convergence, on the iteration limit and on divergence, so a second copy
+  /// of "is it running" kept here would only ever be a chance to disagree.
   bool running{false};
-  /// Outer iterations per rendered frame. Iterating a few times per frame
-  /// keeps the window responsive and lets the flow be watched developing,
-  /// rather than freezing until the answer is ready.
+
+  /// Outer iterations between screen updates. The solver runs continuously on
+  /// its own thread; this is how much work it does before handing the field
+  /// back, so a small value shows the flow developing in finer steps and a
+  /// large one spends less time copying.
   int iterationsPerFrame{5};
   /// Stop automatically once every residual is below this.
   double convergenceTolerance{1e-6};

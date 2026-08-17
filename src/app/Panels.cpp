@@ -968,7 +968,7 @@ void updateFlow(UiState& ui) {
     state.clock.reset();
   };
 
-  if (!state.enabled || !ui.meshing.mesh.has_value()) {
+  if (!state.enabled || ui.meshing.mesh == nullptr) {
     discard();
     state.errorMessage.clear();
     return;
@@ -1078,7 +1078,6 @@ bool updateSolver(UiState& ui) {
 
   if (state.dirty) {
     state.dirty = false;
-    state.engine.reset();
     state.errorMessage.clear();
     state.iteration = 0;
     state.converged = false;
@@ -1087,10 +1086,19 @@ bool updateSolver(UiState& ui) {
     state.continuityHistory.clear();
     state.momentumHistory.clear();
 
+    // Whatever the worker was doing belongs to the previous mesh or field.
+    // Stopping here also joins its thread, which is what makes it safe for the
+    // grid underneath it to have been replaced.
+    // Either the worker was mid-run, or something asked for one before a
+    // worker existed - the command line's --solve, or a converged run being
+    // resumed by an incidence change. Both mean "keep going once rebuilt".
+    const bool wantRunning = state.worker.isRunning() || state.running;
+    state.worker.stop();
+    state.running = false;
+
     // The solver needs a mesh to live on and a field to start from, so it can
     // only exist once both stages ahead of it have produced something.
-    if (!ui.meshing.mesh.has_value() || !ui.flow.field.has_value()) {
-      state.running = false;
+    if (ui.meshing.mesh == nullptr || !ui.flow.field.has_value()) {
       return false;
     }
 
@@ -1098,7 +1106,6 @@ bool updateSolver(UiState& ui) {
         *ui.meshing.mesh, ui.flow.conditions, ui.flow.freestream);
     if (!conditions) {
       state.errorMessage = conditions.error().message();
-      state.running = false;
       return false;
     }
 
@@ -1106,85 +1113,70 @@ bool updateSolver(UiState& ui) {
         *ui.meshing.mesh, std::move(conditions).value(), state.settings);
     if (!created) {
       state.errorMessage = created.error().message();
-      state.running = false;
       return false;
     }
-    state.engine = std::move(created).value();
-
-    if (const Status started = state.engine->initialise(*ui.flow.field); !started) {
+    if (const Status started = created.value().initialise(*ui.flow.field); !started) {
       state.errorMessage = started.error().message();
-      state.engine.reset();
-      state.running = false;
       return false;
+    }
+
+    // The worker holds the grid, not just a pointer into it, so a later
+    // regeneration on this thread cannot pull it out from under the solve.
+    state.worker.adopt(ui.meshing.mesh, std::move(created).value());
+    state.worker.setSettings(state.settings);
+    state.worker.setLimits(state.convergenceTolerance, state.maxIterations,
+                           state.iterationsPerFrame);
+    if (wantRunning) {
+      state.worker.setRunning(true);
+      state.running = true;
     }
   }
 
-  if (!state.engine.has_value() || !state.running) {
+  if (!state.worker.hasSolver()) {
+    state.running = false;
     return false;
   }
 
-  state.engine->setSettings(state.settings);
-  for (int i = 0; i < std::max(1, state.iterationsPerFrame); ++i) {
-    state.monitor = state.engine->iterate();
-    ++state.iteration;
+  state.worker.setSettings(state.settings);
+  state.worker.setLimits(state.convergenceTolerance, state.maxIterations,
+                         state.iterationsPerFrame);
 
-    // Record log10 of the residuals: they fall by many orders of magnitude, so
-    // a linear plot would show a vertical drop and then a flat line.
-    const auto asLog = [](double value) {
-      return static_cast<float>(std::log10(std::max(value, 1e-20)));
-    };
-    state.continuityHistory.push_back(asLog(state.monitor.residuals.continuity));
-    state.momentumHistory.push_back(
-        asLog(std::max(state.monitor.residuals.momentumX, state.monitor.residuals.momentumY)));
+  // Collect whatever the worker has finished since the last frame. Everything
+  // below this point runs on data the worker is no longer touching.
+  SolverUpdate update;
+  if (state.worker.poll(update)) {
+    state.monitor = update.monitor;
+    state.iteration = update.iteration;
+    state.converged = update.converged;
+    state.hitIterationLimit = update.hitIterationLimit;
 
-    // A periodic mark in the log. A long run is otherwise silent until it
-    // finishes, and the useful question during one is not what the residual is
-    // now but whether it is still falling.
-    constexpr long long kProgressEvery = 500;
-    if (state.iteration % kProgressEvery == 0) {
-      CFD_LOG_INFO(kLogCategory,
-                   "iteration {}: continuity {:.3e}, momentum {:.3e} / {:.3e}",
-                   state.iteration, state.monitor.residuals.continuity,
-                   state.monitor.residuals.momentumX, state.monitor.residuals.momentumY);
-    }
+    state.continuityHistory.insert(state.continuityHistory.end(),
+                                   update.continuityHistory.begin(),
+                                   update.continuityHistory.end());
+    state.momentumHistory.insert(state.momentumHistory.end(),
+                                 update.momentumHistory.begin(),
+                                 update.momentumHistory.end());
 
-    if (!std::isfinite(state.monitor.residuals.continuity) ||
-        !std::isfinite(state.monitor.residuals.momentumX)) {
+    if (update.diverged) {
       state.errorMessage =
           "the solve diverged; lower the relaxation factors and start again";
-      state.running = false;
-      return false;
     }
-    if (state.monitor.residuals.worst() < state.convergenceTolerance) {
-      state.converged = true;
-      state.running = false;
-      CFD_LOG_INFO(kLogCategory, "converged after {} iterations, continuity {:.3e}",
-                   state.iteration, state.monitor.residuals.continuity);
-      break;
-    }
-    if (state.iteration >= state.maxIterations) {
-      state.hitIterationLimit = true;
-      state.running = false;
-      CFD_LOG_WARN(kLogCategory,
-                   "stopped at the {} iteration limit; continuity {:.3e}, momentum {:.3e} "
-                   "- not converged",
-                   state.maxIterations, state.monitor.residuals.continuity,
-                   state.monitor.residuals.worst());
-      break;
-    }
+
+    // The viewport reads this field, so publish it.
+    ui.flow.field = std::move(update.field);
+    ui.flow.divergence = std::move(update.divergence);
+    ui.flow.residuals = update.monitor.residuals;
+    // The field has moved, so the colour map has to move with it. Leaving the
+    // range from the uniform starting state makes every solved value saturate,
+    // which reads as a broken solution rather than a stale legend.
+    refreshFieldRange(ui);
+    // Likewise the surface quantities, which are read off this field.
+    ui.surface.dirty = true;
   }
 
-  // The viewport reads the solver's field directly, so publish it.
-  ui.flow.field = state.engine->field();
-  ui.flow.divergence = state.engine->divergence();
-  ui.flow.residuals = state.monitor.residuals;
-  // The field has moved, so the colour map has to move with it. Leaving the
-  // range from the uniform starting state makes every solved value saturate,
-  // which reads as a broken solution rather than a stale legend.
-  refreshFieldRange(ui);
-  // Likewise the surface quantities, which are read off this field.
-  ui.surface.dirty = true;
-
+  // The worker decides when a run is over, so read the answer from it rather
+  // than keeping a second copy here that could disagree.
+  state.running = state.worker.isRunning();
   return state.running;
 }
 
@@ -1205,7 +1197,7 @@ void updateSurface(UiState& ui) {
   state.lowerCf.clear();
   state.errorMessage.clear();
 
-  if (!ui.meshing.mesh.has_value() || !ui.flow.field.has_value() ||
+  if (ui.meshing.mesh == nullptr || !ui.flow.field.has_value() ||
       !ui.geometry.airfoil.has_value()) {
     return;
   }
@@ -1281,7 +1273,7 @@ void updateSurface(UiState& ui) {
 }
 
 void fitDomain(UiState& ui) {
-  if (!ui.meshing.mesh.has_value()) {
+  if (ui.meshing.mesh == nullptr) {
     return;
   }
   const std::vector<Vec2>& nodes = ui.meshing.mesh->nodes();
@@ -1329,7 +1321,8 @@ void updateMesh(UiState& ui) {
 
   state.errorMessage.clear();
   state.lastGenerationMs = elapsed.count();
-  state.mesh = std::move(generated).value();
+  state.mesh = std::make_shared<const mesh::Mesh>(std::move(generated).value());
+  ++state.revision;
 
   // The flow lives on this mesh, so a new grid invalidates it.
   ui.flow.dirty = true;
@@ -1634,7 +1627,7 @@ void drawMeshPanel(UiState& ui) {
     ImGui::PopStyleColor();
     return;
   }
-  if (!state.mesh.has_value()) {
+  if (state.mesh == nullptr) {
     return;
   }
 
@@ -1723,7 +1716,7 @@ void drawFlowPanel(UiState& ui) {
     ImGui::TextColored(theme::kTextDisabled, "No flow state.");
     return;
   }
-  if (!ui.meshing.mesh.has_value()) {
+  if (ui.meshing.mesh == nullptr) {
     ImGui::TextColored(theme::kLevelWarning, "A mesh is needed first.");
     return;
   }
@@ -1993,23 +1986,30 @@ void drawSolverPanel(UiState& ui) {
 
   // --- run controls ---
   const float buttonWidth = (ImGui::GetContentRegionAvail().x - 12.0f) / 3.0f;
+  // The buttons talk to the worker, not to a local flag: it is the thing that
+  // is actually running, and it stops itself on convergence.
   if (ImGui::Button(state.running ? "Pause" : "Run", ImVec2(buttonWidth, 0.0f))) {
-    state.running = !state.running;
-    if (state.running) {
+    const bool wanted = !state.running;
+    if (wanted) {
       state.converged = false;
+      state.hitIterationLimit = false;
+      state.errorMessage.clear();
     }
+    state.worker.setRunning(wanted);
+    state.running = wanted;
   }
   ImGui::SameLine();
-  if (ImGui::Button("Step", ImVec2(buttonWidth, 0.0f)) && state.engine.has_value()) {
-    state.running = true;
-    const int saved = state.iterationsPerFrame;
-    state.iterationsPerFrame = 1;
-    updateSolver(ui);
-    state.iterationsPerFrame = saved;
-    state.running = false;
+  if (ImGui::Button("Step", ImVec2(buttonWidth, 0.0f)) && state.worker.hasSolver()) {
+    // One iteration, then back to paused. The worker publishes whatever it
+    // reaches, so the single step is visible even though it happens off this
+    // thread and lands on a later frame.
+    state.converged = false;
+    state.hitIterationLimit = false;
+    state.worker.requestIterations(1);
   }
   ImGui::SameLine();
   if (ImGui::Button("Reset", ImVec2(buttonWidth, 0.0f))) {
+    state.worker.setRunning(false);
     state.running = false;
     // Back to the undisturbed stream, not to whatever the field happened to
     // hold. Rebuilding the flow rather than only the solver is what makes that
@@ -2500,7 +2500,7 @@ void drawViewport(UiState& ui) {
     ui.viewInitialized = true;
   }
   // Deferred until the viewport has a real size, since framing depends on it.
-  if (ui.meshing.pendingDomainFit && ui.meshing.mesh.has_value()) {
+  if (ui.meshing.pendingDomainFit && ui.meshing.mesh != nullptr) {
     fitDomain(ui);
     ui.meshing.pendingDomainFit = false;
   }
@@ -2559,12 +2559,12 @@ void drawViewport(UiState& ui) {
   // Painted back to front: shaded cells, then the grid over them, then the
   // boundaries, then the section, which must win every overlap.
   const bool haveFlow = ui.flow.enabled && ui.flow.field.has_value() &&
-                        ui.meshing.mesh.has_value();
+                        ui.meshing.mesh != nullptr;
   if (haveFlow && ui.flow.showField) {
     drawScalarField(draw, ui, origin);
   }
 
-  if (ui.meshing.mesh.has_value()) {
+  if (ui.meshing.mesh != nullptr) {
     if (ui.meshing.showInterior) {
       drawMeshLines(draw, ui, origin);
     }
