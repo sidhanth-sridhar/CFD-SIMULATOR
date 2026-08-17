@@ -784,6 +784,11 @@ Phases 0 to 7 are complete. Later phases build on them in order:
 [`JOURNAL.md`](JOURNAL.md) is a technical journal explaining what each phase
 implements, why it is built that way, and the concepts behind it.
 
+[`ISSUES.md`](ISSUES.md) is the flat list of every defect found, its root cause
+and whether it is fixed — so "what is currently wrong with this program" can be
+answered without reading eight chapters. Open issues and known limitations are
+at the top.
+
 ## License
 
 Not yet chosen.
