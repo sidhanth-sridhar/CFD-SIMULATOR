@@ -245,6 +245,10 @@ struct Application::Impl {
   int screenshotAfterFrames{3};
   int frameStatsEvery{0};
   long long maxFrames{0};
+  /// A sweep was asked for on the command line: start it once the pipeline is
+  /// up, and close the window when it finishes.
+  bool sweepRequested{false};
+  bool sweepStarted{false};
 
   void drawFrame();
   void layoutAndDrawPanels();
@@ -296,6 +300,7 @@ void Application::Impl::layoutAndDrawPanels() {
       drawSolverPanel(ui);
       drawSurfacePanel(ui);
       drawForcePanel(ui);
+      drawPolarPanel(ui);
       drawSessionPanel(ui);
     }
     ImGui::End();
@@ -359,6 +364,20 @@ void Application::Impl::drawFrame() {
   // Last: the surface distributions and streamlines are read off whatever
   // field the previous steps left behind.
   updateSurface(ui);
+  // Last of all: a sweep decides what to do next from the forces just taken.
+  updatePolar(ui);
+
+  // A sweep asked for on the command line starts as soon as there is something
+  // to solve on, and closes the window when it is done.
+  if (sweepRequested && !sweepStarted && ui.meshing.mesh != nullptr &&
+      ui.flow.field.has_value()) {
+    startPolarSweep(ui);
+    sweepStarted = true;
+  }
+
+  // Keep redrawing between points too: the gap while one solve is rebuilt is
+  // not a reason to drop to the idle refresh rate.
+  solverWantsRedraw = solverWantsRedraw || ui.polar.running;
 
   // Drain any trackpad pinch once per frame; the viewport applies and clears it.
   ui.pinchMagnification += platform::consumePinchMagnification();
@@ -487,6 +506,29 @@ Status Application::initialize(const ApplicationOptions& options) {
       impl_->ui.flow.view = FieldView::VelocityMagnitude;
     }
     impl_->ui.flow.dirty = true;
+  }
+
+  if (options.runPolarSweep) {
+    // A sweep needs somewhere to solve, so bring the whole pipeline up with it.
+    if (!impl_->ui.meshing.enabled) {
+      impl_->ui.meshing.enabled = true;
+      impl_->ui.meshing.dirty = true;
+    }
+    impl_->ui.flow.enabled = true;
+    impl_->ui.flow.dirty = true;
+    impl_->ui.meshing.pendingDomainFit = false;
+
+    impl_->ui.polar.startDeg = options.polarStartDeg;
+    impl_->ui.polar.endDeg = options.polarEndDeg;
+    impl_->ui.polar.stepDeg = options.polarStepDeg;
+    if (!options.polarCsvPath.empty()) {
+      auto& buffer = impl_->ui.polar.csvPath;
+      const std::size_t copied =
+          std::min(options.polarCsvPath.size(), buffer.size() - 1);
+      std::copy_n(options.polarCsvPath.begin(), copied, buffer.begin());
+      buffer[copied] = '\0';
+    }
+    impl_->sweepRequested = true;
   }
 
   impl_->screenshotPath = options.screenshotPath;
@@ -674,6 +716,14 @@ int Application::run() {
 
     ++frameIndex;
     if (impl_->maxFrames > 0 && frameIndex >= impl_->maxFrames) {
+      glfwSetWindowShouldClose(impl_->window, GLFW_TRUE);
+    }
+    // A sweep asked for on the command line is the whole job: once it has run,
+    // there is nothing left for the window to do.
+    if (impl_->sweepRequested && impl_->sweepStarted && !impl_->ui.polar.running) {
+      if (impl_->ui.polar.polar.empty() && !impl_->ui.polar.errorMessage.empty()) {
+        exitCode = 1;
+      }
       glfwSetWindowShouldClose(impl_->window, GLFW_TRUE);
     }
     // When a solve is running, let it finish before capturing: a screenshot of

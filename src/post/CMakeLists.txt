@@ -6,6 +6,7 @@
 
 add_library(cfd_post STATIC
     Forces.cpp
+    Polar.cpp
     Streamlines.cpp
     SurfaceData.cpp)
 

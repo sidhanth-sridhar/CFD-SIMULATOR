@@ -21,6 +21,7 @@ add_executable(cfd_tests
     LogTests.cpp
     MeshTests.cpp
     Naca4Tests.cpp
+    PolarTests.cpp
     SolverTests.cpp
     SurfaceDataTests.cpp
     ValidationTests.cpp)

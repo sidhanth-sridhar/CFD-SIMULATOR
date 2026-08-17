@@ -43,6 +43,11 @@ struct Options {
   double reynoldsNumber{0.0};
   double angleOfAttackDeg{0.0};
   bool angleGiven{false};
+  bool runPolarSweep{false};
+  double polarStart{0.0};
+  double polarEnd{18.0};
+  double polarStep{2.0};
+  std::string polarCsvPath;
   std::string fieldView;
 };
 
@@ -65,6 +70,9 @@ void printUsage() {
       "      --solve             Start the solver running (implies --flow)\n"
       "      --reynolds N        Reynolds number based on the chord\n"
       "      --alpha DEG         Angle of attack in degrees\n"
+      "      --polar A:B:S       Sweep incidence from A to B in steps of S degrees,\n"
+      "                          write the polar and exit (implies --flow)\n"
+      "      --polar-csv FILE    Where the sweep writes its CSV\n"
       "      --field NAME        Shown scalar: velocity, vx, vy, pressure\n"
       "                          or divergence\n"
       "      --frame-stats N     Log a frame-time summary every N frames\n"
@@ -130,6 +138,36 @@ cfd::Result<Options> parseArguments(std::span<const std::string_view> args) {
                           "--alpha must be a number of degrees"};
       }
       options.angleGiven = true;
+    } else if (arg == "--polar") {
+      if (i + 1 >= args.size()) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          "--polar requires a range, e.g. --polar 0:18:2"};
+      }
+      ++i;
+      const std::string spec{args[i]};
+      const std::size_t first = spec.find(':');
+      const std::size_t second = (first == std::string::npos)
+                                     ? std::string::npos
+                                     : spec.find(':', first + 1);
+      if (first == std::string::npos || second == std::string::npos) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          "--polar takes start:end:step, e.g. 0:18:2"};
+      }
+      options.polarStart = std::strtod(spec.substr(0, first).c_str(), nullptr);
+      options.polarEnd = std::strtod(spec.substr(first + 1, second - first - 1).c_str(),
+                                     nullptr);
+      options.polarStep = std::strtod(spec.substr(second + 1).c_str(), nullptr);
+      if (!(options.polarStep > 0.0)) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          "--polar needs a positive step"};
+      }
+      options.runPolarSweep = true;
+    } else if (arg == "--polar-csv") {
+      if (i + 1 >= args.size()) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument, "--polar-csv requires a path"};
+      }
+      ++i;
+      options.polarCsvPath = std::string{args[i]};
     } else if (arg == "--solve") {
       options.startSolver = true;
     } else if (arg == "--flow") {
@@ -300,6 +338,11 @@ int main(int argc, char** argv) {
     appOptions.reynoldsNumber = options.reynoldsNumber;
     appOptions.angleOfAttackDeg = options.angleOfAttackDeg;
     appOptions.angleGiven = options.angleGiven;
+    appOptions.runPolarSweep = options.runPolarSweep;
+    appOptions.polarStartDeg = options.polarStart;
+    appOptions.polarEndDeg = options.polarEnd;
+    appOptions.polarStepDeg = options.polarStep;
+    appOptions.polarCsvPath = options.polarCsvPath;
     appOptions.frameStatsEvery = options.frameStatsEvery;
     appOptions.maxFrames = options.maxFrames;
 

@@ -1362,6 +1362,213 @@ void updateSurface(UiState& ui) {
   }
 }
 
+namespace {
+
+/// Rebuild the plot-ready copies from the recorded points.
+void refreshPolarSeries(PolarState& state) {
+  state.alphaAxis.clear();
+  state.clSeries.clear();
+  state.cdSeries.clear();
+  state.cmSeries.clear();
+  state.ldSeries.clear();
+
+  for (const post::PolarPoint& point : state.polar.points) {
+    state.alphaAxis.push_back(static_cast<float>(point.angleOfAttackDeg));
+    state.clSeries.push_back(static_cast<float>(point.liftCoefficient));
+    state.cdSeries.push_back(static_cast<float>(point.dragCoefficient));
+    state.cmSeries.push_back(static_cast<float>(point.momentCoefficient));
+    state.ldSeries.push_back(static_cast<float>(point.liftToDrag));
+  }
+}
+
+/// Point the session at one incidence and ask the solver for it.
+void requestAngle(UiState& ui, double angleDeg) {
+  ui.flow.freestream.angleOfAttackDeg = angleDeg;
+  // Continuation is what makes a sweep take minutes rather than an hour: a
+  // degree of incidence is a small perturbation on a converged field.
+  ui.flow.warmStart = ui.polar.continueBetweenPoints;
+  ui.flow.dirty = true;
+  // updateFlow rebuilds the solver, and the rebuild carries this request
+  // through as "keep going once rebuilt".
+  ui.solving.running = true;
+  ui.solving.converged = false;
+  ui.solving.hitIterationLimit = false;
+  ui.solving.errorMessage.clear();
+
+  ui.polar.phase = PolarState::Phase::Starting;
+  ui.polar.startupFrames = 0;
+}
+
+}  // namespace
+
+void startPolarSweep(UiState& ui) {
+  PolarState& state = ui.polar;
+  state.errorMessage.clear();
+  state.savedPath.clear();
+
+  if (ui.meshing.mesh == nullptr || !ui.flow.field.has_value()) {
+    state.errorMessage = "a meshed section with an initialised flow is needed first";
+    return;
+  }
+
+  Result<std::vector<double>> angles =
+      post::sweepAngles(state.startDeg, state.endDeg, state.stepDeg);
+  if (!angles) {
+    state.errorMessage = angles.error().message();
+    return;
+  }
+
+  state.angles = std::move(angles).value();
+  state.index = 0;
+  state.running = true;
+
+  state.polar = post::Polar{};
+  state.polar.section = ui.geometry.airfoil.has_value()
+                            ? ui.geometry.airfoil->designation().name()
+                            : std::string{"unknown"};
+  state.polar.meshResolution = std::string{toString(ui.meshing.resolution)};
+  state.polar.reynoldsNumber = ui.flow.freestream.reynoldsNumber;
+  state.polar.machEquivalentSpeed = ui.flow.freestream.speed;
+  state.polar.chord = ui.geometry.airfoil.has_value() ? ui.geometry.airfoil->chord() : 1.0;
+  state.polar.momentReferenceFraction = ui.surface.momentReferenceFraction;
+  state.polar.continuedBetweenPoints = state.continueBetweenPoints;
+  refreshPolarSeries(state);
+
+  // Where to put the session back when this is over.
+  state.restoreAngleDeg = ui.flow.freestream.angleOfAttackDeg;
+  state.hasRestoreAngle = true;
+
+  CFD_LOG_INFO(kLogCategory,
+               "polar sweep: {} points from {:.2f} to {:.2f} deg in steps of {:.2f}, {}",
+               state.angles.size(), state.startDeg, state.endDeg, state.stepDeg,
+               state.continueBetweenPoints ? "continued between points" : "cold at each point");
+
+  state.statusMessage = std::format("solving 1 of {}", state.angles.size());
+  requestAngle(ui, state.angles.front());
+}
+
+void stopPolarSweep(UiState& ui, std::string_view reason) {
+  PolarState& state = ui.polar;
+  if (!state.running) {
+    return;
+  }
+  state.running = false;
+  state.phase = PolarState::Phase::Idle;
+  ui.solving.running = false;
+  ui.solving.worker.setRunning(false);
+
+  state.statusMessage =
+      std::format("{} - {} of {} points", reason, state.polar.size(), state.angles.size());
+  CFD_LOG_INFO(kLogCategory, "polar sweep {}: {} of {} points recorded", reason,
+               state.polar.size(), state.angles.size());
+
+  if (state.hasRestoreAngle) {
+    ui.flow.freestream.angleOfAttackDeg = state.restoreAngleDeg;
+    ui.flow.warmStart = true;
+    ui.flow.dirty = true;
+    state.hasRestoreAngle = false;
+  }
+}
+
+void updatePolar(UiState& ui) {
+  PolarState& state = ui.polar;
+  if (!state.running) {
+    return;
+  }
+
+  switch (state.phase) {
+    case PolarState::Phase::Idle:
+      return;
+
+    case PolarState::Phase::Starting: {
+      // The request goes through updateFlow and updateSolver, which take a
+      // frame or two to rebuild. Waiting for the solver to actually be running
+      // is what stops the sweep from mistaking "not started yet" for "done".
+      if (ui.solving.running) {
+        state.phase = PolarState::Phase::Solving;
+        return;
+      }
+      if (!ui.solving.errorMessage.empty()) {
+        state.errorMessage = ui.solving.errorMessage;
+        stopPolarSweep(ui, "stopped: the solver could not start");
+        return;
+      }
+      // A handful of frames is generous; anything longer means the request
+      // never took, and silently waiting forever would be the worst outcome.
+      constexpr int kMaxStartupFrames = 240;
+      if (++state.startupFrames > kMaxStartupFrames) {
+        state.errorMessage = "the solver did not start for this angle";
+        stopPolarSweep(ui, "stopped: the solver never started");
+      }
+      return;
+    }
+
+    case PolarState::Phase::Solving:
+      break;
+  }
+
+  if (ui.solving.running) {
+    return;  // still working on this angle
+  }
+
+  // The solve for this angle has stopped, one way or another. Record what it
+  // reached, including whether it got there.
+  post::PolarPoint point;
+  point.angleOfAttackDeg = ui.flow.freestream.angleOfAttackDeg;
+  point.converged = ui.solving.converged;
+  point.iterations = ui.solving.iteration;
+  point.continuityResidual = ui.solving.monitor.residuals.continuity;
+
+  if (ui.surface.forces.has_value()) {
+    const post::AerodynamicForces& forces = *ui.surface.forces;
+    point.liftCoefficient = forces.liftCoefficient;
+    point.dragCoefficient = forces.dragCoefficient;
+    point.pressureDragCoefficient = forces.pressureDragCoefficient;
+    point.frictionDragCoefficient = forces.frictionDragCoefficient;
+    point.momentCoefficient = forces.momentCoefficient;
+    point.liftToDrag = forces.hasLiftToDrag() ? forces.liftToDrag() : 0.0;
+  }
+  if (ui.surface.distribution.has_value()) {
+    const post::SurfaceDistribution& surface = *ui.surface.distribution;
+    point.upperSeparation =
+        surface.upperSeparation.found ? surface.upperSeparation.chordFraction : -1.0;
+    point.lowerSeparation =
+        surface.lowerSeparation.found ? surface.lowerSeparation.chordFraction : -1.0;
+  }
+
+  state.polar.points.push_back(point);
+  refreshPolarSeries(state);
+
+  CFD_LOG_INFO(kLogCategory,
+               "polar point {} of {}: alpha {:.2f} deg, Cl {:+.5f}, Cd {:+.5f}, "
+               "Cm {:+.5f}, L/D {:.3f}{}",
+               state.polar.size(), state.angles.size(), point.angleOfAttackDeg,
+               point.liftCoefficient, point.dragCoefficient, point.momentCoefficient,
+               point.liftToDrag, point.converged ? "" : " (NOT CONVERGED)");
+
+  ++state.index;
+  if (state.index >= state.angles.size()) {
+    // Write the file before announcing success, so "saved" always means saved.
+    const std::string path{state.csvPath.data()};
+    const Status written = post::writeCsv(state.polar, path);
+    if (written) {
+      state.savedPath = path;
+      CFD_LOG_INFO(kLogCategory, "polar written to {}", path);
+    } else {
+      state.errorMessage = written.error().message();
+      CFD_LOG_ERROR(kLogCategory, "could not write the polar: {}",
+                    written.error().format());
+    }
+    stopPolarSweep(ui, state.polar.allConverged() ? "finished"
+                                                  : "finished with unconverged points");
+    return;
+  }
+
+  state.statusMessage =
+      std::format("solving {} of {}", state.index + 1, state.angles.size());
+  requestAngle(ui, state.angles[state.index]);
+}
+
 void fitDomain(UiState& ui) {
   if (ui.meshing.mesh == nullptr) {
     return;
@@ -2286,7 +2493,7 @@ void drawDistributionPlot(const char* id, const char* title, float height,
                           const std::vector<float>& lowerX,
                           const std::vector<float>& lowerY, PlotRange range, bool invertY,
                           double upperSeparation, double lowerSeparation,
-                          bool showSeparation) {
+                          bool showSeparation, float xMin = 0.0f, float xMax = 1.0f) {
   if (upperY.empty() && lowerY.empty()) {
     return;
   }
@@ -2313,8 +2520,10 @@ void drawDistributionPlot(const char* id, const char* title, float height,
     return;
   }
 
+  const float xSpan = (xMax > xMin) ? (xMax - xMin) : 1.0f;
   const auto toScreen = [&](float x, float y) {
-    const float fx = plotMin.x + (plotMax.x - plotMin.x) * std::clamp(x, 0.0f, 1.0f);
+    const float fx =
+        plotMin.x + (plotMax.x - plotMin.x) * std::clamp((x - xMin) / xSpan, 0.0f, 1.0f);
     float t = std::clamp((y - low) / (high - low), 0.0f, 1.0f);
     if (!invertY) {
       t = 1.0f - t;  // screen y grows downwards
@@ -2325,13 +2534,22 @@ void drawDistributionPlot(const char* id, const char* title, float height,
   const ImU32 gridColour = ImGui::GetColorU32(theme::kGridMajor);
   const ImU32 textColour = ImGui::GetColorU32(theme::kTextDisabled);
 
-  // Chordwise gridlines every fifth of the chord.
-  for (int i = 0; i <= 5; ++i) {
-    const float x = static_cast<float>(i) / 5.0f;
-    const ImVec2 top = toScreen(x, high);
+  // Gridlines on human-readable values rather than on fifths of whatever the
+  // range happens to be. A sweep from 2 to 10 degrees labelled 2, 4, 6, 8, 10
+  // reads instantly; the same axis labelled 2, 3.6, 5.2, 6.8, 8.4, 10 does not.
+  const double tick = niceStep(static_cast<double>(xSpan) / 5.0);
+  const double firstTick = std::ceil(static_cast<double>(xMin) / tick) * tick;
+  for (int i = 0; i < kMinorPerMajor * 4; ++i) {
+    const double value = firstTick + tick * i;
+    if (value > static_cast<double>(xMax) + tick * 1e-6) {
+      break;
+    }
+    const ImVec2 top = toScreen(static_cast<float>(value), high);
     draw->AddLine(ImVec2(top.x, plotMin.y), ImVec2(top.x, plotMax.y), gridColour, 1.0f);
-    draw->AddText(ImVec2(top.x - 8.0f, plotMax.y + 2.0f), textColour,
-                  std::format("{:.1f}", x).c_str());
+    const std::string label = formatWorld(value, tick);
+    const float labelWidth = ImGui::CalcTextSize(label.c_str()).x;
+    draw->AddText(ImVec2(top.x - labelWidth * 0.5f, plotMax.y + 2.0f), textColour,
+                  label.c_str());
   }
 
   // Zero line, if it is in range - the reference for both quantities.
@@ -2366,7 +2584,8 @@ void drawDistributionPlot(const char* id, const char* title, float height,
   if (showSeparation) {
     const ImU32 marker = ImGui::GetColorU32(theme::kSeparation);
     for (const double station : {upperSeparation, lowerSeparation}) {
-      if (!(station > 0.0) || !(station < 1.0)) {
+      if (!(station > static_cast<double>(xMin)) ||
+          !(station < static_cast<double>(xMax))) {
         continue;
       }
       const ImVec2 at = toScreen(static_cast<float>(station), high);
@@ -2580,6 +2799,175 @@ void drawForcePanel(UiState& ui) {
                    std::format("Cd  {:+.4f}", state.dragHistory.back()).c_str(),
                    FLT_MAX, FLT_MAX, ImVec2(-FLT_MIN, 52.0f));
   ImGui::Checkbox("Convergence", &state.showForcePlots);
+}
+
+void drawPolarPanel(UiState& ui) {
+  PolarState& state = ui.polar;
+
+  if (!ImGui::CollapsingHeader("Polar", ImGuiTreeNodeFlags_DefaultOpen)) {
+    return;
+  }
+
+  // --- sweep range ---
+  const bool locked = state.running;
+  ImGui::BeginDisabled(locked);
+  if (beginInfoTable("polar_range", 104.0f)) {
+    const auto degreeRow = [&](const char* label, const char* id, double* value) {
+      ImGui::TableNextRow();
+      ImGui::TableSetColumnIndex(0);
+      ImGui::TextColored(theme::kTextDim, "%s", label);
+      ImGui::TableSetColumnIndex(1);
+      ImGui::SetNextItemWidth(-FLT_MIN);
+      if (ImGui::DragScalar(id, ImGuiDataType_Double, value, 0.05f, nullptr, nullptr,
+                            "%.2f deg")) {
+        *value = std::clamp(*value, -90.0, 90.0);
+      }
+    };
+    degreeRow("Start", "##polarstart", &state.startDeg);
+    degreeRow("End", "##polarend", &state.endDeg);
+
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::TextColored(theme::kTextDim, "Step");
+    ImGui::TableSetColumnIndex(1);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::DragScalar("##polarstep", ImGuiDataType_Double, &state.stepDeg, 0.02f,
+                          nullptr, nullptr, "%.2f deg")) {
+      state.stepDeg = std::clamp(state.stepDeg, 0.05, 45.0);
+    }
+    ImGui::EndTable();
+  }
+
+  ImGui::Checkbox("Continue between points", &state.continueBetweenPoints);
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip(
+        "Start each angle from the previous solution instead of the undisturbed\n"
+        "stream. Much faster, and the same answer - a converged steady solution\n"
+        "does not depend on what it was started from.");
+  }
+  ImGui::EndDisabled();
+
+  // How many solves the current range implies, before committing to them.
+  Result<std::vector<double>> planned =
+      post::sweepAngles(state.startDeg, state.endDeg, state.stepDeg);
+  if (!planned) {
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::kLevelWarning);
+    ImGui::TextWrapped("%s", planned.error().message().c_str());
+    ImGui::PopStyleColor();
+  } else if (!state.running) {
+    ImGui::TextColored(theme::kTextDisabled, "%zu angles, one full solve each.",
+                       planned.value().size());
+  }
+
+  // --- run controls ---
+  ImGui::Spacing();
+  const float buttonWidth = (ImGui::GetContentRegionAvail().x - 8.0f) / 2.0f;
+  ImGui::BeginDisabled(state.running || !planned);
+  if (ImGui::Button("Run sweep", ImVec2(buttonWidth, 0.0f))) {
+    startPolarSweep(ui);
+  }
+  ImGui::EndDisabled();
+  ImGui::SameLine();
+  ImGui::BeginDisabled(!state.running);
+  if (ImGui::Button("Stop", ImVec2(buttonWidth, 0.0f))) {
+    stopPolarSweep(ui, "stopped by hand");
+  }
+  ImGui::EndDisabled();
+
+  if (!state.errorMessage.empty()) {
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::kLevelError);
+    ImGui::TextWrapped("%s", state.errorMessage.c_str());
+    ImGui::PopStyleColor();
+  }
+
+  if (state.running) {
+    const float progress = state.angles.empty()
+                               ? 0.0f
+                               : static_cast<float>(state.polar.size()) /
+                                     static_cast<float>(state.angles.size());
+    ImGui::ProgressBar(progress, ImVec2(-FLT_MIN, 0.0f), state.statusMessage.c_str());
+    ImGui::TextColored(theme::kTextDim, "alpha %.2f deg, iteration %lld",
+                       ui.flow.freestream.angleOfAttackDeg, ui.solving.iteration);
+  } else if (!state.statusMessage.empty()) {
+    ImGui::TextColored(theme::kTextDim, "%s", state.statusMessage.c_str());
+  }
+
+  if (state.polar.empty()) {
+    return;
+  }
+
+  // --- results ---
+  ImGui::Spacing();
+  ImGui::SeparatorText("Results");
+  if (beginInfoTable("polar_summary", 104.0f)) {
+    infoRow(ui, "Points", std::format("{}", state.polar.size()));
+    const int best = state.polar.bestLiftToDragIndex();
+    if (best >= 0) {
+      const post::PolarPoint& point = state.polar.points[static_cast<std::size_t>(best)];
+      infoRow(ui, "Best L/D", std::format("{:.3f} at {:.2f} deg", point.liftToDrag,
+                                          point.angleOfAttackDeg));
+    } else {
+      infoRow(ui, "Best L/D", "-");
+    }
+    if (!state.polar.allConverged()) {
+      infoRow(ui, "Warning", "some points did not converge");
+    }
+    ImGui::EndTable();
+  }
+
+  // --- CSV ---
+  ImGui::Spacing();
+  ImGui::TextColored(theme::kTextDim, "CSV");
+  ImGui::SameLine();
+  ImGui::SetNextItemWidth(-FLT_MIN);
+  if (ui.fonts.mono != nullptr) {
+    ImGui::PushFont(ui.fonts.mono, 0.0f);
+  }
+  ImGui::InputText("##polarcsv", state.csvPath.data(), state.csvPath.size());
+  if (ui.fonts.mono != nullptr) {
+    ImGui::PopFont();
+  }
+  if (ImGui::Button("Save CSV", ImVec2(-FLT_MIN, 0.0f))) {
+    const std::string path{state.csvPath.data()};
+    const Status written = post::writeCsv(state.polar, path);
+    if (written) {
+      state.savedPath = path;
+      state.errorMessage.clear();
+      CFD_LOG_INFO(kLogCategory, "polar written to {}", path);
+    } else {
+      state.errorMessage = written.error().message();
+    }
+  }
+  if (!state.savedPath.empty()) {
+    ImGui::TextColored(theme::kBcOutlet, "saved to %s", state.savedPath.c_str());
+  }
+
+  if (!state.showPolarPlots || state.alphaAxis.size() < 2) {
+    ImGui::Checkbox("Curves", &state.showPolarPlots);
+    return;
+  }
+
+  // --- curves ---
+  const float alphaMin = state.alphaAxis.front();
+  const float alphaMax = std::max(state.alphaAxis.back(), alphaMin + 1.0f);
+  const std::vector<float> none;
+  const auto plot = [&](const char* id, const char* title, const std::vector<float>& ys,
+                        float height) {
+    drawDistributionPlot(id, title, height, state.alphaAxis, ys, none, none,
+                         rangeOf(state.alphaAxis, ys, none, none, -1e30f), false, -1.0,
+                         -1.0, false, alphaMin, alphaMax);
+  };
+
+  ImGui::Spacing();
+  plot("##polarcl", "Cl vs alpha (deg)", state.clSeries, 110.0f);
+  ImGui::Spacing();
+  plot("##polarcd", "Cd vs alpha (deg)", state.cdSeries, 90.0f);
+  ImGui::Spacing();
+  plot("##polarcm", "Cm vs alpha (deg)", state.cmSeries, 90.0f);
+  ImGui::Spacing();
+  plot("##polarld", "L/D vs alpha (deg)", state.ldSeries, 90.0f);
+  ImGui::Spacing();
+  ImGui::Checkbox("Curves", &state.showPolarPlots);
 }
 
 void drawSessionPanel(UiState& ui) {

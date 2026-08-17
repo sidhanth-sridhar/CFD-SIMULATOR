@@ -73,6 +73,15 @@ struct ApplicationOptions {
   double angleOfAttackDeg{0.0};
   bool angleGiven{false};
 
+  /// Run an angle-of-attack sweep at startup and exit when it finishes.
+  /// Implies a mesh and a flow.
+  bool runPolarSweep{false};
+  double polarStartDeg{0.0};
+  double polarEndDeg{18.0};
+  double polarStepDeg{2.0};
+  /// Where the sweep writes its CSV. Empty keeps the default.
+  std::string polarCsvPath;
+
   /// Scalar shown in the viewport: "velocity", "vx", "vy", "pressure" or
   /// "divergence". Empty keeps the default.
   std::string initialFieldView{};

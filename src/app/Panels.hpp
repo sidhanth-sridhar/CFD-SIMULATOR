@@ -33,6 +33,7 @@
 #include "cfd/mesh/CGrid.hpp"
 #include "cfd/mesh/Mesh.hpp"
 #include "cfd/post/Forces.hpp"
+#include "cfd/post/Polar.hpp"
 #include "cfd/post/Streamlines.hpp"
 #include "cfd/post/SurfaceData.hpp"
 #include "cfd/solver/SimpleSolver.hpp"
@@ -359,6 +360,63 @@ struct SurfaceState {
   double reportedLowerSeparation{-1.0};
 };
 
+/// An automated angle-of-attack sweep.
+///
+/// Driven as a state machine over frames rather than as a loop, because every
+/// point is a full solve: a loop would freeze the window for the minutes the
+/// sweep takes, and the flow developing at each incidence is worth watching.
+/// The sweep sets the incidence, hands the existing solver the same work it
+/// would do for a single point, and waits for it to stop.
+struct PolarState {
+  double startDeg{0.0};
+  double endDeg{18.0};
+  double stepDeg{2.0};
+
+  /// Continue each point from the previous point's field instead of starting
+  /// cold. Enormously faster - a degree of incidence is a small perturbation -
+  /// and validated in the surface tests to reach the same answer. Left
+  /// switchable because continuation is also how hysteresis would be
+  /// introduced if the flow ever had more than one steady state.
+  bool continueBetweenPoints{true};
+
+  enum class Phase {
+    Idle,
+    /// Incidence set, waiting for the solver to pick the work up.
+    Starting,
+    /// Solver running on the current angle.
+    Solving,
+  };
+  Phase phase{Phase::Idle};
+
+  bool running{false};
+  std::size_t index{0};
+  std::vector<double> angles;
+  post::Polar polar;
+
+  /// Frames spent waiting for the solver to start, so a point that never
+  /// begins cannot wedge the sweep silently.
+  int startupFrames{0};
+
+  std::array<char, 256> csvPath{"polar.csv"};
+  std::string statusMessage;
+  std::string errorMessage;
+  /// Set once a sweep has finished and its CSV has been written.
+  std::string savedPath;
+
+  // Plot-ready copies, rebuilt whenever a point is recorded.
+  std::vector<float> alphaAxis;
+  std::vector<float> clSeries;
+  std::vector<float> cdSeries;
+  std::vector<float> cmSeries;
+  std::vector<float> ldSeries;
+  bool showPolarPlots{true};
+
+  /// Incidence to restore when the sweep ends, so a sweep does not leave the
+  /// session somewhere the user never chose to be.
+  double restoreAngleDeg{0.0};
+  bool hasRestoreAngle{false};
+};
+
 /// Everything the UI reads or mutates during a frame.
 ///
 /// A single plain struct rather than a web of widget objects: with immediate
@@ -404,6 +462,7 @@ struct UiState {
 
   GeometryState geometry;
   MeshState meshing;
+  PolarState polar;
   FlowState flow;
   SolverState solving;
   SurfaceState surface;
@@ -440,6 +499,15 @@ bool updateSolver(UiState& ui);
 /// Runs after updateSolver, since both are read from the solved field.
 void updateSurface(UiState& ui);
 
+/// Advance an angle-of-attack sweep. Must run after updateSurface: a point is
+/// recorded from the forces that were just integrated.
+void updatePolar(UiState& ui);
+
+/// Begin a sweep over the configured range. Reports why not, if it cannot.
+void startPolarSweep(UiState& ui);
+/// Stop a sweep where it stands, keeping the points already gathered.
+void stopPolarSweep(UiState& ui, std::string_view reason);
+
 /// Restore the default view: origin centred, unit chord comfortably framed.
 void resetView(UiState& ui);
 
@@ -459,6 +527,7 @@ void drawFlowPanel(UiState& ui);
 void drawSolverPanel(UiState& ui);
 void drawSurfacePanel(UiState& ui);
 void drawForcePanel(UiState& ui);
+void drawPolarPanel(UiState& ui);
 void drawSessionPanel(UiState& ui);
 void drawViewport(UiState& ui);
 void drawConsole(UiState& ui);
