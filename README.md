@@ -3,8 +3,8 @@
 A 2D Reynolds-Averaged Navier-Stokes solver for NACA airfoil sections, with an
 interactive viewer.
 
-**Status: Phase 6 — aerodynamic forces integrated from the surface solution.
-Laminar; no turbulence model yet.**
+**Status: Phase 7 — automated angle-of-attack sweeps producing aerodynamic
+polars. Laminar; no turbulence model yet.**
 
 The application generates NACA four-digit sections, builds a structured C-grid
 around them, solves the steady incompressible Navier-Stokes equations on them
@@ -16,7 +16,11 @@ Type a designation such as `NACA 2412`, tick **Generate mesh**, then
 
 Lift, drag, pitching moment and their coefficients are then obtained by
 integrating that surface solution — pressure and viscous stress, around the
-contour — at any angle of attack.
+contour — at any angle of attack, and a sweep over a range of incidences
+produces a polar and writes it to CSV.
+
+Every point of that polar is a separate converged Navier-Stokes solve. Nothing
+is fitted, interpolated between angles, or taken from a lift-curve formula.
 
 Separation is detected from the sign of the computed wall shear, never assumed
 or hard-coded. If the solution does not reverse, the application says the
@@ -96,6 +100,8 @@ Add `--output-on-failure` to see diagnostics from failing tests.
 | `--solve` | Start the solver running at startup (implies `--flow`) |
 | `--reynolds N` | Reynolds number based on the chord |
 | `--alpha DEG` | Angle of attack in degrees |
+| `--polar A:B:S` | Sweep incidence from A to B in steps of S degrees, write the polar and exit |
+| `--polar-csv FILE` | Where the sweep writes its CSV (default `polar.csv`) |
 | `--frame-stats N` | Log a frame-time summary (mean and worst) every N frames |
 | `--max-frames N` | Stop after N frames; makes a timing run a bounded measurement |
 | `--log-level LEVEL` | `trace`, `debug`, `info`, `warn`, `error`, `critical`, `off` |
@@ -337,6 +343,69 @@ Two sparklines trace *C<sub>l</sub>* and *C<sub>d</sub>* against extraction
 number. A coefficient still drifting once the residuals have flattened has not
 converged, whatever the residuals say, and only a trace shows that.
 
+### Angle-of-attack sweeps and polars
+
+One solve gives one number at one incidence, which is almost never the question.
+What a section is chosen by is how those numbers behave as incidence changes:
+how steeply lift builds, where the lift curve stops being straight, how fast
+drag grows once it does, and where the best lift-to-drag ratio sits. The
+**Polar** panel sweeps a range and produces those curves.
+
+Set a start, an end and a step; the panel says how many solves that implies
+before you commit to them. **Run sweep** works through the angles, showing the
+flow developing at each one, with a progress bar and a live point count. It can
+be stopped at any time and keeps the points already gathered.
+
+Four curves are drawn against angle of attack: *C<sub>l</sub>*, *C<sub>d</sub>*,
+*C<sub>m</sub>* and *L/D*. The panel reports the best lift-to-drag ratio and the
+incidence it occurs at — the single most-asked question of a polar — and warns
+if any point failed to converge.
+
+**Every point is a real solve.** The sweep sets the incidence and hands the
+solver exactly the work it would do for a single point. There is no fitting, no
+interpolation between angles and no empirical lift-curve slope anywhere in it.
+Where a solve fails to converge, its row says so rather than quietly reporting
+whatever the iteration was holding.
+
+**Continuation between points** is on by default: each angle starts from the
+previous angle's converged field instead of the undisturbed stream. A degree of
+incidence is a small perturbation, so this is dramatically cheaper — in the
+sweep below the first point needed 5,000 iterations and the last needed 827 —
+and it reaches the same answer, which the surface tests pin down directly. It
+can be switched off, because continuation is also how hysteresis would be
+introduced if the flow ever had more than one steady state at an incidence.
+
+Unattended, from the command line:
+
+```sh
+cfd_sim --section "NACA 0012" --mesh coarse --reynolds 500 \
+        --polar 0:18:2 --polar-csv naca0012_re500.csv
+```
+
+The window closes when the sweep finishes.
+
+**CSV output.** The conditions go in as `#` comment lines above the header,
+which pandas, R, gnuplot and most spreadsheets can be told to skip, and which
+keep the file self-describing when it is opened a month later:
+
+```
+# cfd_simulator aerodynamic polar
+# section,NACA 0012
+# mesh,Coarse
+# reynolds,500
+# freestream_speed_mps,50
+# chord_m,1
+# moment_reference_xc,0.25
+# continued_between_points,yes
+# every row is a separate Navier-Stokes solve; nothing is interpolated
+alpha_deg,cl,cd,cd_pressure,cd_friction,cm,l_over_d,separation_upper_xc,separation_lower_xc,converged,iterations,continuity_residual
+```
+
+Separation columns are left empty where the surface stayed attached, rather than
+carrying a −1 that invites being plotted. `converged` and `iterations` travel
+with every row: a polar that silently mixes converged and unconverged points is
+worse than no polar.
+
 ### Viewport controls
 
 | Input | Action |
@@ -509,6 +578,28 @@ checkerboarding, and the residual band corresponds to a mass imbalance of
 around 0.02–0.1% of the inflow. It is a convergence defect, not a wrong answer,
 and it is unresolved. `JOURNAL.md` §6 records what was ruled out.
 
+### Polar validation
+
+Seventeen tests cover the parts of a sweep that can be checked without a window
+— which are the parts where a mistake would be silent:
+
+| Check | Why it matters |
+|---|---|
+| 0→18 step 2 gives exactly ten angles, ending on 18 | `(18−0)/2` can evaluate a hair under 9; truncating would silently drop the last angle, and 0→16 is a perfectly plausible-looking polar |
+| 0→18 step 0.1 gives 181 angles, ending exactly on 18 | angles are computed as `start + i·step`, never accumulated |
+| 0→5 step 2 stops at 4 | a step that does not divide the range must not overshoot |
+| Non-positive step, end below start, absurd point counts | refused rather than started: `0:20:0.001` is 20,001 solves |
+| Best L/D ignores unconverged points | an unconverged point is not a design point |
+| Every CSV row has exactly the header's twelve fields | including rows whose separation columns are empty |
+| Unconverged points are marked in the file | the row admits it |
+| Written file reads back identical | no encoding surprise |
+
+The sweep's own state machine is driven by the UI and has no automated test —
+it needs a window. It has been run end to end repeatedly, and its coefficients
+agree with the individually-solved values in the table above to about half a
+percent, the difference being that each point stops at its own convergence
+tolerance from a different starting field.
+
 ### Force validation
 
 The exact checks impose a field whose force is known in closed form and require
@@ -631,16 +722,17 @@ reproduces the exact same sources or fails loudly.
 
 ## Roadmap
 
-Phases 0 to 6 are complete. Later phases build on them in order:
+Phases 0 to 7 are complete. Later phases build on them in order:
 
 1. ~~NACA 4-digit geometry generation~~ — done
 2. ~~Mesh generation around the section~~ — done
 3. ~~Navier-Stokes discretisation~~ — done (laminar, SIMPLE)
 4. ~~Viscous flow around an aerofoil: Cp, Cf, wall shear, separation~~ — done
 5. ~~Force and moment integration (lift, drag, moment coefficients)~~ — done
-6. Reynolds averaging (RANS)
-7. k-ω SST turbulence closure
-8. Vortex structures and stall behaviour
+6. ~~Angle-of-attack sweeps and polars~~ — done
+7. Reynolds averaging (RANS)
+8. k-ω SST turbulence closure
+9. Vortex structures and stall behaviour
 
 ## Documentation
 

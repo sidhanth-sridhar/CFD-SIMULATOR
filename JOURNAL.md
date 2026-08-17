@@ -2992,4 +2992,198 @@ low-Reynolds-number answers, not aerofoil-handbook ones.
   opposite directions for the same physical reason. Properties that emerge
   across a sweep are much harder to fake than properties checked at one point.
 
+**Next:** angle-of-attack sweeps and polars, on explicit instruction.
+
+---
+
+# Phase 7 — Angle of Attack and Polars
+
+**Completed:** 2026-08-16
+**Outcome:** 237/237 tests pass. An automated sweep produces C_l, C_d, C_m and
+L/D against angle of attack, with configurable start, end and step, and writes
+the result to CSV. Every point is a separate converged solve.
+
+## 1. Scope
+
+Sweep incidence automatically, produce the four curves, and save them. The
+incidence control itself already existed - a slider added alongside Phase 5 -
+so this phase is about *automating* it and about what a sweep is allowed to
+claim.
+
+## 2. What a polar is, and what it is not
+
+One solve gives one number for each coefficient at one incidence. That is almost
+never the question anyone has. A section is chosen by how those numbers behave
+as incidence changes: how steeply lift builds, where the lift curve stops being
+straight, how fast drag grows once it does, and where the best lift-to-drag
+ratio sits.
+
+The acceptance criterion here is unusually pointed - "generated from actual
+simulations rather than empirical formulas" - and it is worth saying why that is
+a real distinction rather than a formality. It would be entirely possible to
+produce a beautiful, plausible, completely fictional polar from
+$C_l = 2\pi\alpha$ and a drag polar $C_d = C_{d0} + kC_l^2$. It would look
+right, it would have the right shape, and it would be worth nothing. So the
+design point of this phase is that a row exists in the table *if and only if* a
+Navier-Stokes solve was run to produce it - and if that solve did not converge,
+the row says so rather than quietly reporting whatever the iteration was
+holding.
+
+## 3. Design: a state machine, not a loop
+
+The obvious implementation is a loop over angles, each iteration solving to
+convergence. It is also unusable: at the coarse resolution a point takes tens of
+seconds to minutes, so a ten-point sweep would freeze the window for something
+between five minutes and an hour.
+
+The sweep is therefore a state machine advanced once per frame:
+
+```
+Starting  -> incidence set, waiting for the solver to pick the work up
+Solving   -> solver running; wait for it to stop
+(record)  -> take the forces, append the point, request the next angle
+```
+
+Because the solver already runs on its own thread from the performance work, the
+window stays fully responsive throughout, the flow can be watched developing at
+each incidence, and the sweep can be stopped at any point and keeps what it has.
+
+**The transition that needed care** is `Starting`. The obvious version checks
+"has the solver stopped?" - but immediately after requesting a new angle the
+solver has not *started*, which looks identical. So `Starting` waits for
+`solving.running` to become true before `Solving` is allowed to look for it
+becoming false. With a bounded number of frames before giving up, because
+silently waiting forever is the worst possible failure for something that takes
+minutes anyway.
+
+**Continuation between points** is on by default. Each angle starts from the
+previous angle's converged field rather than the undisturbed stream. This was
+already built and already validated for the incidence slider in Phase 5 - the
+test that solves 12 degrees cold and from a converged 6 degrees and requires
+them to agree - and here it pays for itself completely: in the sweep below the
+first point needed 5,000 iterations and the last needed 827.
+
+It is switchable, and the reason is worth recording. Continuation is exactly the
+mechanism by which hysteresis would appear if the flow ever had more than one
+steady state at an incidence: sweeping up and sweeping down would then give
+different answers, both of them "converged". At Re = 500 in a steady laminar
+solver that is not expected, but "not expected" is not "impossible", and the
+switch is what makes it checkable rather than assumed.
+
+## 4. Where the code went, and why
+
+The testable half - which angles a sweep visits, the table of results, and the
+CSV - went into `cfd_post` as `Polar.hpp/.cpp`. The state machine went into the
+application layer, because it drives the UI's own pipeline and needs a window to
+run.
+
+That split is not arbitrary. The parts in `cfd_post` are pure functions of their
+inputs and are exactly the parts where a mistake is *silent*: a sweep that
+quietly skips its last angle, or a CSV whose rows do not line up with its
+header. Those get tested. The state machine's failure mode is visible - the
+sweep stalls, or the progress bar stops - and testing it would need a window.
+
+### Two details in the arithmetic
+
+**Angles are computed, not accumulated.** `start + i*step`, never
+`previous + step`. A sweep from 0 to 18 in steps of 0.1 accumulates 180 times,
+and floating-point addition does not promise to land on 18.
+
+**The point count rounds rather than truncates.** `(18 - 0) / 2` can evaluate to
+a hair under 9, and truncating would silently drop the last angle - the sweep
+would run 0 to 16 and nobody would notice, because 0 to 16 is a perfectly
+plausible polar. The specification's own example is exactly this case, which is
+why it is the first test.
+
+**And a sweep can be refused.** Every point is a full solve, so `0:20:0.001` is
+20,001 solves - days of work from one mistyped step. It is rejected with a
+message rather than started.
+
+## 5. The CSV
+
+Conditions go in as `#` comment lines above the header. Coefficients without the
+Reynolds number and the section they belong to are not a result, they are four
+columns of numbers; and a file opened a month later has to still say what it is.
+Every common reader can be told to skip comment lines.
+
+Two small decisions:
+
+- **Separation columns are left empty where the surface stayed attached**,
+  rather than carrying a -1. A -1 in a column of chord fractions is an invitation
+  to plot it.
+- **`converged` and `iterations` travel with every row.** A polar that silently
+  mixes converged and unconverged points is worse than no polar, because it
+  looks exactly as authoritative.
+
+## 6. Validation
+
+Seventeen tests on the parts that can be tested without a window:
+
+| Check | Why |
+|---|---|
+| 0 to 18 step 2 gives exactly ten angles, ending on 18 | the specification's own example, and the rounding case |
+| 0 to 18 step 0.1 gives 181 angles, ending exactly on 18 | computed rather than accumulated |
+| 0 to 5 step 2 stops at 4 | a step that does not divide the range must not overshoot |
+| negative start angles, single-point sweeps | ordinary cases that are easy to get wrong at a boundary |
+| non-positive step, end below start, absurd point counts | refused rather than started |
+| best L/D ignores unconverged points | an unconverged point is not a design point |
+| one header, one row per point | the shape of the file |
+| every row has exactly the header's twelve fields | including rows with empty separation columns |
+| conditions and values appear in the text | the file says what it is |
+| unconverged points are marked | the row admits it |
+| written file reads back identical | no encoding surprise |
+
+The end-to-end sweep was then run for real, and the numbers cross-checked
+against the individual solves from Phase 6.
+
+## 7. Status
+
+**Verified by running it**
+
+- 237/237 tests pass; zero warnings under `-DCFD_WARNINGS_AS_ERRORS=ON`.
+- A ten-point sweep from 0 to 18 degrees runs unattended from the command line
+  and writes a valid CSV.
+- Coefficients agree with the individually-solved Phase 6 values to about half a
+  percent - the residual difference being that each point stops at its own
+  convergence tolerance from a different starting field.
+- Continuation cut the iteration count per point by roughly six times across the
+  sweep.
+
+**Not verified, and honest limitations**
+
+- **The state machine has no automated test.** It needs a window. It has been
+  run end to end by hand, repeatedly, and its failure modes are visible rather
+  than silent - but that is not the same as a test.
+- **No sweep-down comparison.** Continuation makes hysteresis possible in
+  principle; the switch to check for it exists and has not been used in anger.
+- **Zero incidence still does not converge** (Phase 5 section 6), so the first
+  point of a sweep starting at 0 is always marked unconverged. The CSV says so.
+- **Laminar, Re = 500.** These polars are not comparable with aerofoil-handbook
+  data and should not be read as though they were.
+
+## 8. What I learned
+
+- **"Not from empirical formulas" is a design constraint, not a disclaimer.**
+  The temptation with a polar is that a fitted curve looks *better* than a
+  computed one - smoother, no unconverged point at zero incidence, no faintly
+  ragged L/D curve. Making every row a real solve means accepting that the
+  output looks less tidy than a fabrication would, and marking the ugly points
+  rather than smoothing them.
+
+- **"Has it stopped?" and "has it not started?" look identical.** The
+  `Starting` phase exists entirely because of that, and I would have written the
+  bug without it: the first frame after requesting an angle would have recorded
+  the *previous* angle's forces and moved straight on.
+
+- **A slow operation deserves a preview of its cost.** The panel says how many
+  solves the current range implies before the button is pressed. That is three
+  lines of code and it is the difference between a mistyped step being noticed
+  and being discovered forty minutes later.
+
+- **Work done for one reason pays for another.** Continuation was built to make
+  the incidence slider usable, and the test that justified it was written then.
+  It turned out to be the single thing that makes a sweep take minutes instead
+  of an hour - and it needed no further argument, because the validation was
+  already on the shelf.
+
 **Next:** Reynolds averaging and a turbulence model, on explicit instruction.
