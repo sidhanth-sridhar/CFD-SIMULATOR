@@ -1465,6 +1465,11 @@ void stopPolarSweep(UiState& ui, std::string_view reason) {
   if (state.hasRestoreAngle) {
     ui.flow.freestream.angleOfAttackDeg = state.restoreAngleDeg;
     ui.flow.warmStart = true;
+    // Clearing this first matters: a converged run that has its freestream
+    // changed picks itself back up, which is right for a nudge of the incidence
+    // slider and wrong here. A sweep that has just finished should stop, not
+    // quietly start a further solve at the angle it is putting back.
+    ui.solving.converged = false;
     ui.flow.dirty = true;
     state.hasRestoreAngle = false;
   }
