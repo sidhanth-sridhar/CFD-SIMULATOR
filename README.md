@@ -401,10 +401,55 @@ keep the file self-describing when it is opened a month later:
 alpha_deg,cl,cd,cd_pressure,cd_friction,cm,l_over_d,separation_upper_xc,separation_lower_xc,converged,iterations,continuity_residual
 ```
 
+The sweep above is checked in at
+[`examples/naca0012_re500_polar.csv`](examples/naca0012_re500_polar.csv).
+
 Separation columns are left empty where the surface stayed attached, rather than
 carrying a −1 that invites being plotted. `converged` and `iterations` travel
 with every row: a polar that silently mixes converged and unconverged points is
 worse than no polar.
+
+**A full sweep**, NACA 0012 at Re = 500 on the coarse C-grid, produced by
+`--polar 0:18:2` — ten points, about twelve minutes unattended:
+
+| α | C<sub>l</sub> | C<sub>d</sub> | C<sub>d</sub> pressure | C<sub>d</sub> friction | C<sub>m</sub> c/4 | L/D | Separation x/c | Iterations |
+|---|---|---|---|---|---|---|---|---|
+| 0° | +0.0000 | 0.1859 | 0.0514 | 0.1345 | −0.0000 | — | attached | 5000 *(not converged)* |
+| 2° | +0.1112 | 0.1880 | 0.0542 | 0.1338 | +0.0023 | 0.59 | attached | 2822 |
+| 4° | +0.2211 | 0.1943 | 0.0625 | 0.1318 | +0.0038 | 1.14 | attached | 1652 |
+| 6° | +0.3259 | 0.2046 | 0.0762 | 0.1284 | +0.0044 | 1.59 | 0.919 | 1022 |
+| 8° | +0.4225 | 0.2192 | 0.0952 | 0.1240 | +0.0040 | 1.93 | 0.687 | 827 |
+| 10° | +0.5083 | 0.2381 | 0.1189 | 0.1191 | +0.0026 | 2.14 | 0.514 | 763 |
+| 12° | +0.5816 | 0.2608 | 0.1467 | 0.1141 | −0.0001 | 2.23 | 0.387 | 775 |
+| 14° | +0.6428 | 0.2871 | 0.1779 | 0.1092 | −0.0040 | **2.24** | 0.295 | 816 |
+| 16° | +0.6965 | 0.3172 | 0.2126 | 0.1046 | −0.0098 | 2.20 | 0.228 | 908 |
+| 18° | +0.7439 | 0.3507 | 0.2505 | 0.1002 | −0.0172 | 2.12 | 0.178 | 926 |
+
+Read across it, five things are happening at once, and every one of them is a
+consequence of the same event — the separated region marching up the suction
+side from the trailing edge to within 0.18c of the nose:
+
+- **The lift-curve slope decays monotonically.** Per 2° step: 0.111, 0.110,
+  0.105, 0.097, 0.086, 0.073, 0.061, 0.054, 0.047. That is progressive stall,
+  and no curve fit produced it.
+- **Pressure drag grows five-fold**, 0.051 → 0.251, and overtakes friction drag
+  between 8° and 10°.
+- **Friction drag falls steadily**, 0.134 → 0.100: separated flow drags on the
+  skin far less than attached flow.
+- **L/D peaks at 14°** and turns over — the design point, found rather than
+  assumed.
+- **C<sub>m</sub> about the quarter chord stays within 0.004 of zero while the
+  flow is largely attached** and drifts nose-down only once most of the suction
+  side is separated.
+
+Against the individually-solved Phase 6 values, the sweep agrees to within about
+half a percent (C<sub>l</sub> at 4°, 8° and 12°: 0.38%, 0.57%, 0.15%), the
+difference being that each point stops at its own convergence tolerance from a
+different starting field.
+
+Continuation is what makes this practical: the first point needs 5,000
+iterations — it is the zero-incidence case that does not converge — and every
+point after the second settles in 760 to 930.
 
 ### Viewport controls
 
