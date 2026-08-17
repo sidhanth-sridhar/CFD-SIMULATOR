@@ -11,6 +11,7 @@ find_package(OpenGL REQUIRED)
 
 add_library(cfd_app STATIC
     Application.cpp
+    FieldRenderer.cpp
     Panels.cpp
     SolverWorker.cpp
     Theme.cpp)

@@ -706,6 +706,11 @@ void Application::shutdown() noexcept {
     return;
   }
 
+  // The field cache owns OpenGL objects, so it has to let go of them while the
+  // context they belong to is still current - which is here, not in whatever
+  // order the UiState members happen to be destroyed in later.
+  impl_->ui.flow.renderer.release();
+
   // Strict reverse order of construction. Tearing down the ImGui context
   // before its backends would leave the backends pointing at freed state.
   if (impl_->imguiRendererReady) {

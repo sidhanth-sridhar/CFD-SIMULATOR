@@ -13,6 +13,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -20,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "FieldRenderer.hpp"
 #include "SolverWorker.hpp"
 #include "Theme.hpp"
 #include "cfd/app/Camera2D.hpp"
@@ -78,6 +80,38 @@ struct GeometryState {
   bool dirty{true};
 };
 
+/// Everything about where the camera is and how big the canvas is.
+///
+/// Screen-space geometry is only valid for one of these. Caching it and
+/// comparing the key is what lets the viewport skip rebuilding drawings that
+/// would come out identical - which, while a solve runs and nobody is touching
+/// the mouse, is all of them.
+struct ViewKey {
+  std::uint64_t meshRevision{0};
+  Vec2 cameraCentre{};
+  double pixelsPerUnit{0.0};
+  float originX{0.0f};
+  float originY{0.0f};
+  float width{0.0f};
+  float height{0.0f};
+
+  [[nodiscard]] bool operator==(const ViewKey&) const = default;
+};
+
+/// Grid lines, already projected to the screen.
+///
+/// Held as one flat point array plus the length of each run rather than a
+/// vector of vectors: at the fine resolution this is tens of thousands of
+/// segments, and the allocation churn of the obvious representation costs more
+/// than the projection it is meant to save.
+struct GridLineCache {
+  ViewKey key;
+  bool valid{false};
+  std::vector<ImVec2> points;
+  std::vector<int> runs;
+  int stride{1};
+};
+
 /// Mesh inputs, the grid they produced, and how it is drawn.
 struct MeshState {
   bool enabled{false};
@@ -117,6 +151,9 @@ struct MeshState {
   /// is never mistaken for the real one.
   int drawStride{1};
 
+  /// Projected grid lines, reused until the mesh or the view changes.
+  GridLineCache lines;
+
   [[nodiscard]] mesh::CGridOptions options() const {
     mesh::CGridOptions o = mesh::optionsFor(resolution);
     o.upstreamChords = upstreamChords;
@@ -153,6 +190,11 @@ struct FlowState {
 
   std::optional<flow::FlowField> field;
   std::optional<flow::FaceState> faces;
+
+  /// Bumped every time the field's values change. The viewport caches an image
+  /// of the shaded field and needs a cheap way to ask "is what I drew still
+  /// what is here?"; comparing 105,410 cells would defeat the purpose.
+  std::uint64_t revision{0};
   std::vector<double> divergence;
   flow::ResidualSet residuals;
   flow::TimeState clock;
@@ -201,9 +243,16 @@ struct FlowState {
   double rangeMin{0.0};
   double rangeMax{1.0};
 
-  /// Cells actually shaded last frame, and whether that was all of them.
+  /// Cells actually shaded, and whether the last frame redrew them or reused
+  /// the cached image.
   std::size_t shadedCells{0};
   bool shadingComplete{true};
+  bool shadingRebuilt{false};
+
+  /// Owns the offscreen texture the shaded field is cached in. Lives here
+  /// because it is per-view state, but it holds OpenGL objects, so the
+  /// application releases it explicitly while the context is still current.
+  FieldRenderer renderer;
 };
 
 /// The solver, its controls and its convergence history.
@@ -264,6 +313,17 @@ struct SurfaceState {
   int streamlineSeeds{22};
   std::string errorMessage;
   bool dirty{true};
+
+  /// When the streamlines were last traced.
+  ///
+  /// Extracting the wall quantities is cheap - a walk along one row of faces -
+  /// but tracing streamlines integrates thousands of RK4 steps through the
+  /// mesh, and the field arrives from the solver many times a second. Retracing
+  /// on every arrival would put the solver's publication rate straight onto the
+  /// render thread's bill, so while a solve is running they are refreshed on a
+  /// timer instead and brought fully up to date the moment it stops.
+  std::chrono::steady_clock::time_point lastStreamlineTrace{};
+  bool hasTracedStreamlines{false};
 
   /// Last separation locations written to the log, or -1 for "none". The
   /// surface is re-extracted every frame the solver advances, so without this

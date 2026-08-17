@@ -270,7 +270,18 @@ constexpr int kMeshSegmentBudget = 60000;
 ///   * Decimation. If what survives culling is still over budget, every n-th
 ///     grid line is drawn. That is a lie about the mesh, so the stride is
 ///     reported back and shown in the panel rather than hidden.
-void drawMeshLines(ImDrawList* draw, UiState& ui, ImVec2 origin) {
+/// Project the grid lines to the screen and store them in the cache.
+///
+/// Split out from the drawing so the expensive half - two passes over every
+/// node, a visibility test and a transform each - happens only when the view
+/// it was computed for has changed.
+void buildMeshLines(UiState& ui, ImVec2 origin, const ViewKey& key) {
+  GridLineCache& cache = ui.meshing.lines;
+  cache.points.clear();
+  cache.runs.clear();
+  cache.key = key;
+  cache.valid = true;
+
   const mesh::Mesh& grid = *ui.meshing.mesh;
   if (!grid.isStructured()) {
     return;
@@ -315,17 +326,17 @@ void drawMeshLines(ImDrawList* draw, UiState& ui, ImVec2 origin) {
       (visible > kMeshSegmentBudget)
           ? static_cast<int>((visible + kMeshSegmentBudget - 1) / kMeshSegmentBudget)
           : 1;
+  cache.stride = stride;
   ui.meshing.drawStride = stride;
 
-  const ImU32 colour = ImGui::GetColorU32(theme::kMeshLine);
-  std::vector<ImVec2> run;
-  run.reserve(static_cast<std::size_t>(std::max(ni, nj)));
-
+  int runLength = 0;
   const auto flush = [&]() {
-    if (run.size() >= 2) {
-      draw->AddPolyline(run.data(), static_cast<int>(run.size()), colour, 1.0f, 0);
+    if (runLength >= 2) {
+      cache.runs.push_back(runLength);
+    } else if (runLength == 1) {
+      cache.points.pop_back();
     }
-    run.clear();
+    runLength = 0;
   };
 
   // Lines of constant j, running along the surface and out into the wake.
@@ -337,10 +348,12 @@ void drawMeshLines(ImDrawList* draw, UiState& ui, ImVec2 origin) {
         flush();
         continue;
       }
-      if (run.empty()) {
-        run.push_back(toScreen(a));
+      if (runLength == 0) {
+        cache.points.push_back(toScreen(a));
+        ++runLength;
       }
-      run.push_back(toScreen(b));
+      cache.points.push_back(toScreen(b));
+      ++runLength;
     }
     flush();
   }
@@ -354,12 +367,38 @@ void drawMeshLines(ImDrawList* draw, UiState& ui, ImVec2 origin) {
         flush();
         continue;
       }
-      if (run.empty()) {
-        run.push_back(toScreen(a));
+      if (runLength == 0) {
+        cache.points.push_back(toScreen(a));
+        ++runLength;
       }
-      run.push_back(toScreen(b));
+      cache.points.push_back(toScreen(b));
+      ++runLength;
     }
     flush();
+  }
+}
+
+void drawMeshLines(ImDrawList* draw, UiState& ui, ImVec2 origin, ImVec2 size) {
+  ViewKey key;
+  key.meshRevision = ui.meshing.revision;
+  key.cameraCentre = ui.camera.center();
+  key.pixelsPerUnit = ui.camera.pixelsPerUnit();
+  key.originX = origin.x;
+  key.originY = origin.y;
+  key.width = size.x;
+  key.height = size.y;
+
+  GridLineCache& cache = ui.meshing.lines;
+  if (!cache.valid || !(cache.key == key)) {
+    buildMeshLines(ui, origin, key);
+  }
+  ui.meshing.drawStride = cache.stride;
+
+  const ImU32 colour = ImGui::GetColorU32(theme::kMeshLine);
+  std::size_t offset = 0;
+  for (const int run : cache.runs) {
+    draw->AddPolyline(cache.points.data() + offset, run, colour, 1.0f, 0);
+    offset += static_cast<std::size_t>(run);
   }
 }
 
@@ -382,7 +421,7 @@ double fieldValue(const UiState& ui, FieldView view, std::size_t c) {
 /// Cells are drawn as two triangles each with anti-aliasing off, so
 /// neighbouring cells tile exactly instead of blending along every shared
 /// edge - the same reason the section's fill is built that way.
-void drawScalarField(ImDrawList* draw, UiState& ui, ImVec2 origin) {
+void drawScalarField(ImDrawList* draw, UiState& ui, ImVec2 origin, ImVec2 size) {
   const mesh::Mesh& grid = *ui.meshing.mesh;
   const flow::FlowField& field = *ui.flow.field;
   if (field.size() != grid.cellCount()) {
@@ -390,60 +429,42 @@ void drawScalarField(ImDrawList* draw, UiState& ui, ImVec2 origin) {
   }
 
   const auto [worldMin, worldMax] = ui.camera.visibleBounds();
-  const auto toScreen = [&](const Vec2& world) {
-    const Vec2 s = ui.camera.worldToScreen(world);
-    return ImVec2(static_cast<float>(static_cast<double>(origin.x) + s.x),
-                  static_cast<float>(static_cast<double>(origin.y) + s.y));
-  };
 
-  const bool signedField = isSignedField(ui.flow.view);
-  double low = ui.flow.rangeMin;
-  double high = ui.flow.rangeMax;
-  if (high <= low) {
-    // A uniform field has no range at all. Widen it a touch so the map returns
-    // its midpoint rather than dividing by zero.
-    const double pad = std::max(std::abs(high), 1.0) * 1e-6;
-    low -= pad;
-    high += pad;
-  }
-  const double span = high - low;
+  // The offscreen target is sized in framebuffer pixels, not ImGui points: on
+  // a Retina display those differ by the backing scale, and using points would
+  // produce a texture at half resolution that reads as a blurry field.
+  const ImVec2 fbScale = ImGui::GetIO().DisplayFramebufferScale;
+  const float scaleX = std::max(fbScale.x, 1.0f);
+  const float scaleY = std::max(fbScale.y, 1.0f);
+  const int widthPx = static_cast<int>(size.x * scaleX);
+  const int heightPx = static_cast<int>(size.y * scaleY);
 
-  const ImDrawListFlags savedFlags = draw->Flags;
-  draw->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+  FieldKey key;
+  key.meshRevision = ui.meshing.revision;
+  key.fieldRevision = ui.flow.revision;
+  key.view = static_cast<int>(ui.flow.view);
+  key.signedMap = isSignedField(ui.flow.view);
+  key.rangeMin = ui.flow.rangeMin;
+  key.rangeMax = ui.flow.rangeMax;
+  key.cameraCentre = ui.camera.center();
+  key.pixelsPerUnit = ui.camera.pixelsPerUnit() * static_cast<double>(scaleX);
+  key.widthPx = widthPx;
+  key.heightPx = heightPx;
 
-  std::size_t shaded = 0;
-  for (std::size_t c = 0; c < grid.cellCount(); ++c) {
-    const std::array<int, 4>& corners = grid.cellNodes()[c];
-    const Vec2& p0 = grid.nodes()[static_cast<std::size_t>(corners[0])];
-    const Vec2& p1 = grid.nodes()[static_cast<std::size_t>(corners[1])];
-    const Vec2& p2 = grid.nodes()[static_cast<std::size_t>(corners[2])];
-    const Vec2& p3 = grid.nodes()[static_cast<std::size_t>(corners[3])];
-
-    const double cellMinX = std::min({p0.x, p1.x, p2.x, p3.x});
-    const double cellMaxX = std::max({p0.x, p1.x, p2.x, p3.x});
-    const double cellMinY = std::min({p0.y, p1.y, p2.y, p3.y});
-    const double cellMaxY = std::max({p0.y, p1.y, p2.y, p3.y});
-    if (cellMaxX < worldMin.x || cellMinX > worldMax.x || cellMaxY < worldMin.y ||
-        cellMinY > worldMax.y) {
-      continue;
-    }
-
-    const double t = (fieldValue(ui, ui.flow.view, c) - low) / span;
-    const ImU32 colour =
-        signedField ? theme::divergingColour(t) : theme::sequentialColour(t);
-
-    const ImVec2 a = toScreen(p0);
-    const ImVec2 b = toScreen(p1);
-    const ImVec2 d = toScreen(p2);
-    const ImVec2 e = toScreen(p3);
-    draw->AddTriangleFilled(a, b, d, colour);
-    draw->AddTriangleFilled(a, d, e, colour);
-    ++shaded;
-  }
-
-  draw->Flags = savedFlags;
-  ui.flow.shadedCells = shaded;
+  const ImTextureID texture = ui.flow.renderer.texture(key, grid, field, ui.flow.divergence,
+                                                       worldMin, worldMax);
+  ui.flow.shadedCells = ui.flow.renderer.shadedCells();
   ui.flow.shadingComplete = true;
+  ui.flow.shadingRebuilt = ui.flow.renderer.rebuiltLast();
+
+  if (texture == 0) {
+    return;
+  }
+
+  // OpenGL puts the first row of a texture at the bottom and ImGui puts the
+  // origin at the top, so the vertical coordinate is handed over flipped.
+  const ImVec2 corner(origin.x + size.x, origin.y + size.y);
+  draw->AddImage(texture, origin, corner, ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f));
 }
 
 /// Colour bar for the shaded field, bottom-left of the canvas.
@@ -1017,6 +1038,7 @@ void updateFlow(UiState& ui) {
   state.errorMessage.clear();
   state.field = std::move(field).value();
   state.faces = std::move(faces).value();
+  ++state.revision;
   state.divergence = std::move(div).value();
   state.residuals = flow::continuityResidual(grid, state.divergence);
 
@@ -1166,6 +1188,7 @@ bool updateSolver(UiState& ui) {
     ui.flow.field = std::move(update.field);
     ui.flow.divergence = std::move(update.divergence);
     ui.flow.residuals = update.monitor.residuals;
+    ++ui.flow.revision;
     // The field has moved, so the colour map has to move with it. Leaving the
     // range from the uniform starting state makes every solved value saturate,
     // which reads as a broken solution rather than a stale legend.
@@ -1188,7 +1211,6 @@ void updateSurface(UiState& ui) {
   state.dirty = false;
 
   state.distribution.reset();
-  state.streamlines.clear();
   state.upperX.clear();
   state.upperCp.clear();
   state.upperCf.clear();
@@ -1226,7 +1248,25 @@ void updateSurface(UiState& ui) {
   fill(state.distribution->upper, state.upperX, state.upperCp, state.upperCf);
   fill(state.distribution->lower, state.lowerX, state.lowerCp, state.lowerCf);
 
-  if (state.showStreamlines) {
+  // Streamlines are the expensive part of this function by a wide margin, so
+  // they are refreshed on their own schedule: always when the solve is not
+  // advancing, and at a bounded rate while it is. The picture stays live
+  // without the tracer being run once per published field.
+  constexpr double kStreamlineIntervalMs = 250.0;
+  const auto tracedAt = std::chrono::steady_clock::now();
+  const double sinceTraceMs =
+      state.hasTracedStreamlines
+          ? std::chrono::duration<double, std::milli>(tracedAt - state.lastStreamlineTrace)
+                .count()
+          : kStreamlineIntervalMs;
+  const bool retrace = state.showStreamlines &&
+                       (!ui.solving.running || !state.hasTracedStreamlines ||
+                        sinceTraceMs >= kStreamlineIntervalMs);
+
+  if (!state.showStreamlines) {
+    state.streamlines.clear();
+    state.hasTracedStreamlines = false;
+  } else if (retrace) {
     // Seed a rake upstream of the section, spread over rather more than its
     // thickness so some lines pass close to the surface and some well clear.
     const auto [lower, upper] = ui.geometry.airfoil->bounds();
@@ -1249,6 +1289,8 @@ void updateSurface(UiState& ui) {
     if (traced) {
       state.streamlines = std::move(traced).value();
     }
+    state.lastStreamlineTrace = tracedAt;
+    state.hasTracedStreamlines = true;
   }
 
   const post::SurfaceDistribution& surface = *state.distribution;
@@ -1971,6 +2013,14 @@ void drawFlowPanel(UiState& ui) {
       ImGui::EndTable();
     }
   }
+
+  // The shading is cached in a texture and redrawn only when something that
+  // would change it changes. Saying so matters: a field that is not being
+  // redrawn and a field that is being redrawn instantly look identical right
+  // up until the cache is wrong about one of them.
+  ImGui::Spacing();
+  ImGui::TextColored(theme::kTextDisabled, "%zu cells shaded, %s", state.shadedCells,
+                     state.shadingRebuilt ? "redrawn this frame" : "cached image reused");
 }
 
 void drawSolverPanel(UiState& ui) {
@@ -2561,12 +2611,12 @@ void drawViewport(UiState& ui) {
   const bool haveFlow = ui.flow.enabled && ui.flow.field.has_value() &&
                         ui.meshing.mesh != nullptr;
   if (haveFlow && ui.flow.showField) {
-    drawScalarField(draw, ui, origin);
+    drawScalarField(draw, ui, origin, size);
   }
 
   if (ui.meshing.mesh != nullptr) {
     if (ui.meshing.showInterior) {
-      drawMeshLines(draw, ui, origin);
+      drawMeshLines(draw, ui, origin, size);
     }
     // Boundary conditions supersede the plain mesh patch colouring once the
     // flow exists, because the condition is the more informative thing.
