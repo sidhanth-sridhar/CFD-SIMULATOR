@@ -43,6 +43,18 @@ struct ApplicationOptions {
   /// establishes layout and font atlases that later frames depend on.
   int screenshotAfterFrames{3};
 
+  /// Log a frame-time summary every this many frames, or 0 to stay quiet.
+  ///
+  /// The status bar already shows the instantaneous cost, but a single number
+  /// flickering past is no way to judge whether a change helped. A periodic
+  /// mean and worst case over a fixed window is.
+  int frameStatsEvery{0};
+
+  /// Stop after this many frames. Zero runs until the window is closed. Exists
+  /// so a timing run is a bounded, repeatable measurement rather than something
+  /// that has to be interrupted by hand.
+  long long maxFrames{0};
+
   /// Generate the computational mesh at startup, at the named resolution:
   /// "coarse", "medium" or "fine". Empty leaves meshing switched off.
   std::string initialMeshResolution{};

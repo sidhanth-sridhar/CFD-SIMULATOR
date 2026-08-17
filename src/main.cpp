@@ -34,6 +34,8 @@ struct Options {
   bool selfCheck{false};
   std::string screenshotPath;
   int screenshotFrames{0};
+  int frameStatsEvery{0};
+  long long maxFrames{0};
   std::string section;
   std::string meshResolution;
   bool initialiseFlow{false};
@@ -65,6 +67,8 @@ void printUsage() {
       "      --alpha DEG         Angle of attack in degrees\n"
       "      --field NAME        Shown scalar: velocity, vx, vy, pressure\n"
       "                          or divergence\n"
+      "      --frame-stats N     Log a frame-time summary every N frames\n"
+      "      --max-frames N      Stop after N frames (for timing runs)\n"
       "      --self-check        Run headless startup checks and exit\n"
       "      --screenshot FILE   Render a few frames, save the window to FILE\n"
       "                          as a BMP, then exit\n"
@@ -154,6 +158,25 @@ cfd::Result<Options> parseArguments(std::span<const std::string_view> args) {
       if (options.screenshotFrames < 1) {
         return cfd::Error{cfd::ErrorCode::InvalidArgument,
                           "--screenshot-frames must be at least 1"};
+      }
+    } else if (arg == "--frame-stats") {
+      if (i + 1 >= args.size()) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument, "--frame-stats requires a count"};
+      }
+      ++i;
+      options.frameStatsEvery = std::atoi(std::string{args[i]}.c_str());
+      if (options.frameStatsEvery < 1) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          "--frame-stats must be at least 1"};
+      }
+    } else if (arg == "--max-frames") {
+      if (i + 1 >= args.size()) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument, "--max-frames requires a count"};
+      }
+      ++i;
+      options.maxFrames = std::atoll(std::string{args[i]}.c_str());
+      if (options.maxFrames < 1) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument, "--max-frames must be at least 1"};
       }
     } else if (arg == "--log-level") {
       if (i + 1 >= args.size()) {
@@ -277,6 +300,8 @@ int main(int argc, char** argv) {
     appOptions.reynoldsNumber = options.reynoldsNumber;
     appOptions.angleOfAttackDeg = options.angleOfAttackDeg;
     appOptions.angleGiven = options.angleGiven;
+    appOptions.frameStatsEvery = options.frameStatsEvery;
+    appOptions.maxFrames = options.maxFrames;
 
     cfd::app::Application application;
     if (const cfd::Status status = application.initialize(appOptions); !status) {

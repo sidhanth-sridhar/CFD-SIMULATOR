@@ -243,6 +243,8 @@ struct Application::Impl {
 
   std::string screenshotPath;
   int screenshotAfterFrames{3};
+  int frameStatsEvery{0};
+  long long maxFrames{0};
 
   void drawFrame();
   void layoutAndDrawPanels();
@@ -487,6 +489,8 @@ Status Application::initialize(const ApplicationOptions& options) {
   }
 
   impl_->screenshotPath = options.screenshotPath;
+  impl_->frameStatsEvery = std::max(options.frameStatsEvery, 0);
+  impl_->maxFrames = std::max(options.maxFrames, 0LL);
   impl_->screenshotAfterFrames = std::max(options.screenshotAfterFrames, 1);
 
   glfwSetErrorCallback(&onGlfwError);
@@ -581,6 +585,11 @@ int Application::run() {
   int exitCode = 0;
   long long frameIndex = 0;
 
+  // Frame-time accumulation for the periodic summary.
+  float statsTotalMs = 0.0f;
+  float statsWorstMs = 0.0f;
+  long long statsFrames = 0;
+
   while (glfwWindowShouldClose(impl_->window) == 0) {
     if (capturing || impl_->solverWantsRedraw) {
       // Do not block on input while producing a screenshot or while a solve is
@@ -623,7 +632,26 @@ int Application::run() {
         std::chrono::steady_clock::now() - frameStart;
     impl_->ui.lastFrameCpuMs = elapsed.count();
 
+    if (impl_->frameStatsEvery > 0) {
+      statsTotalMs += impl_->ui.lastFrameCpuMs;
+      statsWorstMs = std::max(statsWorstMs, impl_->ui.lastFrameCpuMs);
+      ++statsFrames;
+      if (statsFrames >= impl_->frameStatsEvery) {
+        const float mean = statsTotalMs / static_cast<float>(statsFrames);
+        CFD_LOG_INFO(kLogCategory,
+                     "frames {}: {:.2f} ms mean, {:.2f} ms worst ({:.0f} fps mean)",
+                     frameIndex + 1, mean, statsWorstMs,
+                     (mean > 0.0f) ? 1000.0f / mean : 0.0f);
+        statsTotalMs = 0.0f;
+        statsWorstMs = 0.0f;
+        statsFrames = 0;
+      }
+    }
+
     ++frameIndex;
+    if (impl_->maxFrames > 0 && frameIndex >= impl_->maxFrames) {
+      glfwSetWindowShouldClose(impl_->window, GLFW_TRUE);
+    }
     // When a solve is running, let it finish before capturing: a screenshot of
     // the third iteration of a SIMPLE run shows nothing worth looking at.
     constexpr long long kMaxSolveFrames = 20000;
