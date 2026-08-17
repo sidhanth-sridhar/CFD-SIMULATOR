@@ -2560,4 +2560,436 @@ minutes went into suspecting the option plumbing, which was innocent.
   drawn from the raw stations. They agree, and if they had not, one of them was
   wrong in a way neither could have revealed alone.
 
-**Next:** force and moment integration, on explicit instruction.
+**Next:** performance work, then force and moment integration, on explicit
+instruction.
+
+---
+
+# Interlude — Making It Responsive
+
+**Completed:** 2026-08-16
+**Outcome:** frame time while solving fell from 80.8 ms to 0.47 ms on the coarse
+grid and from 905 ms to 1.76 ms on the fine one. The solve is unchanged and
+still converges in 1,208 iterations to the same residual and the same separation
+station.
+
+## 1. The complaint, and what was actually wrong
+
+"It lags during and after solves." Four separate causes, worth measuring before
+touching any of them. `--frame-stats` and `--max-frames` were added first for
+exactly that reason: a number flickering in the status bar is no way to judge a
+change, and a periodic mean and worst case over a fixed window is.
+
+| Case | Frame time |
+|---|---|
+| Coarse, solving | 80.8 ms |
+| Coarse, idle | 2.5 ms |
+| Fine, solving | 905 ms |
+| Fine, idle | 11.5 ms |
+
+That table settles the priority immediately. At the fine resolution the solver
+is 893 ms of the 905, and the rendering is 12. Fixing the renderer first would
+have been work spent on 1.3% of the problem.
+
+## 2. The solver on its own thread
+
+**What was happening.** `drawFrame` called `SimpleSolver::iterate()` five times
+in a row. Each of those is Gauss-Seidel sweeps for two momentum components,
+Green-Gauss gradients, Rhie-Chow face fluxes and a preconditioned
+conjugate-gradient pressure solve — about 180 ms on the fine grid. The window
+redrew when that finished, which is to say once a second.
+
+**The design.** A `SolverWorker` owns the solver and a thread. It iterates on
+its own field and periodically publishes a `SolverUpdate` - a complete,
+self-consistent snapshot - under a mutex. The UI *moves* it out, so the render
+thread pays a pointer swap and the copy happens on the worker.
+
+Two details that are easy to get wrong:
+
+- **Coalescing.** Snapshots the UI never collects are simply overwritten by
+  newer ones; that is the right thing for a field. It is the wrong thing for the
+  residual history, where dropping entries would put silent holes in the
+  convergence plot, so that accumulates separately until it is collected.
+- **Publishing when the run stops.** A snapshot is normally due only after both
+  a minimum number of iterations and a minimum interval. But a run that has just
+  converged, hit its limit, diverged or finished a single Step must publish
+  regardless — otherwise a Step could complete and show nothing, which is no
+  step at all.
+
+**The lifetime problem, and why the mesh became a `shared_ptr`.** `SimpleSolver`
+holds a bare pointer to its mesh, and the UI thread is free to regenerate that
+mesh at any moment — changing resolution while a solve runs is an obvious thing
+to do. The worker would then be iterating on freed memory.
+
+`MeshState::mesh` went from `std::optional<Mesh>` to
+`std::shared_ptr<const Mesh>`. A regeneration swaps the UI's pointer and the old
+grid stays alive for exactly as long as the worker still holds it. The
+alternative — the worker keeping its own copy — costs a multi-megabyte copy on
+every rebuild, and rebuilds happen on every nudge of the incidence slider.
+
+**Who owns "running".** The obvious mistake here is a `bool running` in the UI
+mirrored to the worker. The worker stops itself on convergence, on the iteration
+limit and on divergence, so two copies of that flag is two chances to disagree,
+with a race in between. The worker is the authority; the UI reads
+`worker.isRunning()` each frame and the buttons call `setRunning()` directly.
+
+That change had a consequence I did not see coming: `--solve` on the command
+line set the UI's flag before any worker existed, so nothing ever started. The
+rebuild path now treats "the UI wants to run" and "the worker was running" as
+the same request.
+
+## 3. Capping the frame rate while solving
+
+With the solver on another thread, redrawing faster than the display refreshes
+cannot make the answer arrive sooner and takes a core away from the solve. The
+loop now waits out the remainder of a 60 Hz interval — using
+`glfwWaitEventsTimeout`, so input still returns early and nothing gets less
+responsive.
+
+Vsync would normally impose much the same limit. It does not when the window is
+hidden or occluded, which is precisely when spinning is most wasteful and least
+visible.
+
+One subtlety: the interval has to be measured from the *start* of the previous
+frame, not the end. Measured from the end it is added on top of the frame's own
+cost, and a 60 fps target quietly becomes 41.
+
+## 4. Caching the shaded field in a texture
+
+Shading the field is two triangles per cell. At the fine resolution that is
+210,820 triangles, 632,460 vertices, emitted into an ImDrawList every single
+frame to produce an identical picture — and the moment it is most likely to be
+sat and looked at is a converged solution with a still camera.
+
+It is now drawn once into an offscreen texture and blitted as one quad. The key
+is everything that could change the picture: mesh revision, field revision, the
+scalar shown, the colour range, the camera centre and scale, and the viewport
+size. Panning still costs what it cost before, because the texture genuinely has
+to be redrawn; a still camera costs nothing, and during a solve it rebuilds when
+a new field arrives rather than on every redraw.
+
+Revisions rather than content comparison, for the obvious reason: comparing
+105,410 cells to decide whether to redraw 105,410 cells defeats the purpose.
+
+**The bug this produced.** The first version drew the field at half scale, in a
+ragged patch in the middle of the viewport. The offscreen target is sized in
+framebuffer pixels and the camera scale is in ImGui points, and on this display
+those differ by a factor of two. The ragged edge was the giveaway: cells were
+being culled against the *camera's* visible bounds while being drawn into a
+texture covering twice that area, so the cull boundary appeared inside the
+picture. One number was wrong and the shape of the artefact said which.
+
+## 5. Grid lines and streamlines
+
+Grid lines are pure view geometry — two passes over every node, a visibility
+test and a projection each — so they are cached as projected screen points and
+rebuilt only when the mesh or the view changes. Stored as one flat point array
+plus run lengths rather than a vector of vectors: at tens of thousands of
+segments the allocation churn of the obvious representation costs more than the
+projection it is meant to save.
+
+Streamlines are different in kind. Extracting the wall quantities is cheap, but
+tracing integrates thousands of RK4 steps through the mesh, and the field
+arrives from the worker many times a second. Retracing on every arrival puts the
+solver's publication rate straight onto the render thread's bill. They are now
+refreshed on a timer while a solve runs, and brought fully up to date the moment
+it stops — which is when anyone actually studies them.
+
+## 6. Status
+
+| Case | Before | After |
+|---|---|---|
+| Coarse, solving | 80.8 ms (12 fps) | 0.47 ms |
+| Fine, solving | 905 ms (1 fps) | 1.76 ms |
+| Fine, rendering only | 11.5 ms | 3.74 ms |
+
+208/208 tests pass, zero warnings under `-DCFD_WARNINGS_AS_ERRORS=ON`, and the
+solve is unchanged: NACA 0012 at Re = 500 and 8 degrees still converges in 1,208
+iterations to a continuity residual of 9.968x10^-7 with separation at
+x/c = 0.6923. That last check is the one that matters. A performance change that
+alters the answer has not made anything faster; it has made something else.
+
+## 7. What I learned
+
+- **Measure before choosing what to fix.** Three of these four changes were
+  worth making, and one of them was worth 99% of the result. Without the table
+  in section 1 I would have had no way to know which, and the rendering work is
+  the more interesting-looking problem.
+
+- **A cache needs to be able to say it is a cache.** "The field redraws
+  instantly" and "the field is not being redrawn at all" look identical until
+  one of them is wrong, so the panel now says which happened. The same
+  reasoning as the mesh's draw-stride readout in Phase 2.
+
+- **Two copies of one fact is a race waiting to happen.** The `running` flag
+  looked like bookkeeping and was actually shared mutable state. Deciding which
+  side owns it, and making the other side read-only, removed the question
+  instead of answering it.
+
+- **The shape of a rendering artefact names the bug.** A half-scale image with a
+  ragged edge is not "the texture is broken"; it is one factor of two, plus a
+  cull computed in different units from the draw. Reading the picture was faster
+  than reading the code.
+
+---
+
+# Phase 6 — Aerodynamic Forces
+
+**Completed:** 2026-08-16
+**Outcome:** 220/220 tests pass. Lift, drag, moment and their coefficients
+integrated from the surface solution at arbitrary incidence. NACA 0012 at
+Re = 500 gives C_l = 4x10^-5 at zero incidence, a lift-curve slope that falls
+off as separation moves forward, and C_m about the quarter chord within 0.004 of
+zero at every incidence tested.
+
+## 1. Scope
+
+Turn the surface solution into the numbers a section is actually judged by:
+lift, drag, pitching moment, C_l, C_d, C_m and L/D, at any angle of attack.
+
+Everything needed was already computed in Phase 5. This phase is, in the end,
+one loop and one rotation - which is worth saying, because it is the payoff for
+having built the surface extraction properly rather than the start of a new
+edifice.
+
+## 2. The physics, term by term
+
+### A force is a surface integral, and nothing else
+
+The fluid touches the section only at its surface. Whatever force it exerts must
+therefore be the sum of what it does at every point of that surface, and only
+two things happen there:
+
+- **Pressure**, pushing perpendicular to the skin, always inwards.
+- **Wall shear**, dragging along the skin in the direction the near-wall fluid
+  is moving.
+
+$$\mathbf{F} = \oint \left( -p\,\mathbf{n} + \tau_w \mathbf{t} \right) \mathrm{d}s$$
+
+- $-p\,\mathbf{n}$ - pressure acts *against* the outward normal, because a fluid
+  pushes on a surface, never pulls.
+- $\tau_w \mathbf{t}$ - shear acts *along* the tangent, in the direction the
+  flow next to the wall is going. Which is exactly the tangent convention
+  Phase 5 already established, referenced to the stagnation point.
+
+Nothing about circulation, thin-aerofoil theory or a lift-curve slope enters
+into this. Those are models *of* this integral, and one of the satisfying things
+about computing it directly is that they become predictions to be checked rather
+than assumptions to be trusted.
+
+The moment is the same elements weighted by how far they act from a reference
+point:
+
+$$M = \oint (\mathbf{r} - \mathbf{r}_{\text{ref}}) \times
+\left( -p\,\mathbf{n} + \tau_w \mathbf{t} \right) \mathrm{d}s$$
+
+### Why the freestream pressure is subtracted first
+
+For a closed contour $\oint \mathbf{n}\,\mathrm{d}s = \mathbf{0}$ exactly, so
+adding any constant to the pressure changes the force by nothing at all.
+Mathematically the choice of datum is free.
+
+Numerically it is not. At Re = 500 the reference pressure can be far larger than
+its variation over the section, and integrating the raw value asks for a small
+answer as the difference of large numbers. Using the gauge pressure
+$p - p_\infty$ keeps every term the size of the answer.
+
+That the choice is mathematically free and numerically not is also what makes
+the uniform-pressure test in section 5 sharp: it checks an identity that must
+hold to round-off, and the discretisation either honours it or does not.
+
+### Coefficients
+
+$$C_l = \frac{L}{q c}, \qquad C_d = \frac{D}{q c}, \qquad C_m = \frac{M}{q c^2}$$
+
+with $q = \tfrac{1}{2}\rho U_\infty^2$. This is a 2D solve, so every force is
+per unit span and the reference area is just the chord. The moment needs one more
+factor of chord because it is a force times a length.
+
+### Arbitrary angle of attack
+
+The section never moves in this solver; incidence is applied by turning the
+oncoming stream. Lift and drag are defined relative to that stream - drag along
+it, lift across it - so the body-axis force is rotated by the incidence:
+
+$$D = F_x \cos\alpha + F_y \sin\alpha, \qquad L = F_y \cos\alpha - F_x \sin\alpha$$
+
+That single rotation is the whole of "allow arbitrary angle of attack". The
+mesh, the geometry and the integral are untouched. Rotating the mesh instead
+would change the discretisation along with the physics, and any difference
+between two incidences would then be partly a difference between two grids.
+
+### The sign of the moment
+
+Mathematics counts a moment positive counter-clockwise; aerodynamics counts a
+pitching moment positive nose-up. With x running from the leading edge to the
+trailing edge and y up, raising the nose is *clockwise*, so the two conventions
+are opposite and `pitchingMoment` carries the flip.
+
+Worth checking rather than asserting. Take a flat plate at small positive
+incidence with lift $L$ acting at the quarter chord, and take moments about the
+leading edge: $\mathbf{r} \times \mathbf{F}$ has z-component
+$0.25c \cdot L > 0$. The aerodynamic convention says the moment about the
+leading edge of a lifting section is nose-*down*. The two disagree, so the flip
+is right.
+
+## 3. Design decisions
+
+### Integrating over the wall faces, not over arc length
+
+Each `SurfacePoint` gained a `segmentLength`: the length of the wall face it
+stands at. The integral is then a midpoint rule over the faces themselves,
+which means it is taken on exactly the surface the solver imposed no-slip on,
+not on an approximation reconstructed from station positions.
+
+This is what makes $\oint \mathbf{n}\,\mathrm{d}s = 0$ hold to $10^{-12}$
+rather than merely to "small". It cost one extra field on a struct.
+
+### The pressure/friction split is kept, not just the total
+
+Reporting form drag separately from skin-friction drag turns a single number
+into a diagnosis. In the sweep below, pressure drag nearly triples while
+friction drag *falls* - and both of those are the same physical event, the
+separated region spreading forward. The total alone would show a mild rise and
+say nothing about why.
+
+### The moment reference is a control, not a constant
+
+Quarter chord by default, by convention, because for a thin section in attached
+flow the aerodynamic centre sits very close to it - which makes the moment about
+it nearly a property of the section rather than a number that moves with every
+degree of alpha. But it is on a slider, because "the moment" without its
+reference point is not a quantity.
+
+## 4. Validation: exact identities
+
+These impose a field whose force is known in closed form and require the
+integral to reproduce it to round-off. No solver is involved and there is
+nothing to argue about.
+
+| Check | Why it must hold exactly | Achieved |
+|---|---|---|
+| Uniform pressure exerts no net force | $\oint \mathbf{n}\,\mathrm{d}s = 0$ | $10^{-12}$ |
+| ...at any reference level | the constant cancels | $10^{-9}$ |
+| Still fluid exerts no friction | no gradient, no shear | $10^{-14}$ |
+| Pressure + friction = total | a split must be a split | $10^{-12}$ |
+| Wind axes preserve the force magnitude | a rotation preserves length | $10^{-12}$ |
+| Shifting the reference by **d** shifts M by **d** x **F** | the definition of a moment | $10^{-12}$ |
+
+The first is the sharpest instrument this code has. Any error in a normal, a
+face length or a sign shows up there and essentially nowhere else, because every
+other test has a physically plausible answer nearby to hide in.
+
+## 5. Validation: the solved sweep
+
+NACA 0012, Re = 500, coarse C-grid, converged:
+
+| alpha | C_l | C_d | C_d pressure | C_d friction | C_m c/4 | L/D |
+|---|---|---|---|---|---|---|
+| 0 deg | +0.00004 | 0.1859 | 0.0514 | 0.1345 | -0.0000 | - |
+| 2 deg | +0.1111 | 0.1881 | 0.0542 | 0.1339 | +0.0023 | 0.59 |
+| 4 deg | +0.2220 | 0.1949 | 0.0627 | 0.1322 | +0.0037 | 1.14 |
+| 8 deg | +0.4249 | 0.2201 | 0.0956 | 0.1245 | +0.0039 | 1.93 |
+| 12 deg | +0.5807 | 0.2608 | 0.1466 | 0.1142 | +0.0001 | 2.23 |
+
+Four things in that table are physics, and none of them is asserted anywhere in
+the code:
+
+1. **The lift-curve slope falls off**: 0.0555 per degree from 0 to 4 degrees,
+   0.039 from 8 to 12. That is the onset of stall, and it tracks separation
+   moving forward from x/c = 0.69 to 0.39 over the same range - a number
+   computed by a completely different part of the program.
+2. **Pressure drag nearly triples** as the separated region spreads.
+3. **Friction drag falls** while it does: separated flow drags on the skin far
+   less than attached flow. The two drag components moving in opposite
+   directions for the same reason is the kind of thing a wrong integral does not
+   accidentally produce.
+4. **C_m about the quarter chord stays within 0.004 of zero** at every
+   incidence. For a symmetric section the aerodynamic centre *is* the quarter
+   chord, so the moment about it should be zero at all alpha. It is. That is an
+   independent check on the moment integration that no single-incidence test
+   could give.
+
+**One external cross-check.** Laminar flat-plate theory gives a total
+skin-friction coefficient of $2 \times 1.328/\sqrt{Re} = 0.119$ at Re = 500.
+The computed friction drag at zero incidence is 0.134, about 13% higher. That is
+the right direction and the right size for a 12% thick section: 2% more wetted
+area than a flat plate, plus acceleration over the forward half. It is not a
+test - an aerofoil is not a flat plate - but a number in the wrong decade would
+have been worth knowing about.
+
+**And one honest caveat.** The lift-curve slope is roughly half the
+thin-aerofoil value of $2\pi$ per radian. That is expected at Re = 500, where
+the boundary layer is a substantial fraction of the section thickness and
+decambers it, but it is worth stating plainly: these are laminar,
+low-Reynolds-number answers, not aerofoil-handbook ones.
+
+## 6. Status
+
+**Verified by running it**
+
+- 220/220 tests pass; zero warnings under `-DCFD_WARNINGS_AS_ERRORS=ON`.
+- Six exact identities hold to between $10^{-9}$ and $10^{-14}$.
+- Symmetric section at zero incidence: C_l = 4x10^-5, |C_m| below 10^-5.
+- Lift reverses exactly with incidence on a symmetric section.
+- Coefficients settle: 700 versus 1400 iterations agree to $2\times10^{-2}$.
+
+**Not verified, and honest limitations**
+
+- **Laminar only**, at Re = 500 - three orders of magnitude below where real
+  aerofoils operate. No coefficient here should be compared with a handbook.
+- **No comparison against wind-tunnel data or another code.** The sweep is
+  internally consistent and physically sensible; that is not the same thing.
+- **No grid-convergence study of the coefficients.** They are shown to settle in
+  *iteration*, not in *mesh resolution*, and those are different claims.
+- Zero incidence still does not converge in continuity (Phase 5 section 6). The
+  forces at alpha = 0 are taken from a run that stopped at the iteration limit,
+  which is why that row is the one to trust least - though its C_l of 4x10^-5 is
+  hard to argue with.
+- Wall shear is still a first-order one-sided difference.
+
+## 7. What to understand before the next phase
+
+1. **Reynolds averaging leaves a term with no equation.** Averaging the
+   Navier-Stokes equations produces the Reynolds stresses, which nothing
+   determines. A turbulence model is a guess at that term, which is why there
+   are so many and why none is universally right.
+2. **The eddy viscosity has a place to go already.** `FlowField::viscosity` is
+   per cell and is used as the *effective* viscosity by the momentum assembly.
+   A model writes mu + mu_t into it and the solver needs no change.
+3. **The wall treatment is what will change these numbers most.** A turbulent
+   boundary layer resists separation far better than a laminar one, so the
+   separation stations here would move substantially aft and the lift-curve
+   slope would rise towards the thin-aerofoil value.
+4. **y+ becomes a constraint.** The first-layer height was a free choice for a
+   laminar solve. Turbulence models care where the first cell sits in viscous
+   units.
+
+## 8. What I learned
+
+- **Doing the earlier phase properly is what makes the later one small.** This
+  phase is one loop and one rotation, and it is only that because Phase 5 had
+  already worked out the tangent convention, the normal direction and the
+  station ordering. The force integral inherited a surface that was already
+  correct; had it not been, this would have been where all of those bugs
+  surfaced at once, disguised as a wrong lift coefficient.
+
+- **An identity that must hold exactly is worth more than ten plausible
+  numbers.** $\oint \mathbf{n}\,\mathrm{d}s = 0$ has no physics in it and no
+  tolerance to negotiate. It either holds to round-off or something is wrong,
+  and it is sensitive to almost every mistake the integration could make.
+
+- **Check a sign convention against a case you can reason about.** The
+  mathematical and aerodynamic moment conventions are opposite, and I could
+  have written the flip either way round and believed it. A flat plate with lift
+  at the quarter chord and moments taken about the leading edge settles it in
+  two lines.
+
+- **The most convincing validation was one nobody asked for.** The requirement
+  was symmetry, lift sign, consistency and convergence, and all four pass. But
+  the thing that made me believe the integral was C_m staying at zero about the
+  quarter chord *across* incidence, and the two drag components moving in
+  opposite directions for the same physical reason. Properties that emerge
+  across a sweep are much harder to fake than properties checked at one point.
+
+**Next:** Reynolds averaging and a turbulence model, on explicit instruction.

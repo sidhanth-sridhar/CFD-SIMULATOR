@@ -3,8 +3,8 @@
 A 2D Reynolds-Averaged Navier-Stokes solver for NACA airfoil sections, with an
 interactive viewer.
 
-**Status: Phase 5 — laminar viscous flow around an aerofoil, with surface
-pressure, skin friction and computed separation. No turbulence model yet.**
+**Status: Phase 6 — aerodynamic forces integrated from the surface solution.
+Laminar; no turbulence model yet.**
 
 The application generates NACA four-digit sections, builds a structured C-grid
 around them, solves the steady incompressible Navier-Stokes equations on them
@@ -13,6 +13,10 @@ the solution: surface pressure, *C<sub>p</sub>*, wall shear stress,
 *C<sub>f</sub>*, near-wall velocity, and where the boundary layer separates.
 Type a designation such as `NACA 2412`, tick **Generate mesh**, then
 **Initialise flow**, then press **Run**.
+
+Lift, drag, pitching moment and their coefficients are then obtained by
+integrating that surface solution — pressure and viscous stress, around the
+contour — at any angle of attack.
 
 Separation is detected from the sign of the computed wall shear, never assumed
 or hard-coded. If the solution does not reverse, the application says the
@@ -92,6 +96,8 @@ Add `--output-on-failure` to see diagnostics from failing tests.
 | `--solve` | Start the solver running at startup (implies `--flow`) |
 | `--reynolds N` | Reynolds number based on the chord |
 | `--alpha DEG` | Angle of attack in degrees |
+| `--frame-stats N` | Log a frame-time summary (mean and worst) every N frames |
+| `--max-frames N` | Stop after N frames; makes a timing run a bounded measurement |
 | `--log-level LEVEL` | `trace`, `debug`, `info`, `warn`, `error`, `critical`, `off` |
 | `--self-check` | Headless subsystem check, then exit (this is what CTest runs) |
 | `--screenshot FILE` | Render a few frames, save the window as a BMP, exit |
@@ -287,6 +293,50 @@ RK4 integration, seeded from a rake upstream of the section; they are the
 clearest picture of a separated region, and they cross the wake cut correctly
 because the tracer walks the mesh through the cut's face pairs.
 
+### Aerodynamic forces
+
+Once a surface solution exists the **Forces** panel integrates it, live:
+
+| Quantity | Symbol | Formed as |
+|---|---|---|
+| Lift coefficient | *C<sub>l</sub>* | *L* / (*q c*) |
+| Drag coefficient | *C<sub>d</sub>* | *D* / (*q c*) |
+| Moment coefficient | *C<sub>m</sub>* | *M* / (*q c*<sup>2</sup>), nose-up positive |
+| Efficiency | *L/D* | *C<sub>l</sub>* / *C<sub>d</sub>* |
+
+The fluid touches the section only at its surface, so the entire aerodynamic
+force is what happens there: pressure pushing inwards along the normal, and
+wall shear dragging along the skin.
+
+**F** = ∮ ( −*p* **n** + *τ*<sub>w</sub> **t** ) d*s*  
+*M* = ∮ ( **r** − **r**<sub>ref</sub> ) × ( −*p* **n** + *τ*<sub>w</sub> **t** ) d*s*
+
+The integral runs over the wall faces themselves — each station carries its own
+face length — so it is taken on exactly the surface the solver imposed no-slip
+on, not on an approximation of it. Freestream pressure is subtracted first: it
+integrates to nothing around a closed body, but leaving it in would form a small
+answer as the difference of large numbers.
+
+Drag and pressure drag are reported separately from friction drag, which is the
+most diagnostic split available: form drag climbing away from skin friction is
+what separation looks like as a number.
+
+**Arbitrary angle of attack.** The section and the mesh never move; incidence is
+applied by turning the oncoming stream, and lift and drag are defined relative
+to that stream. So the body-axis force is rotated by the incidence to get wind
+axes — one rotation, and nothing else in the pipeline changes. Rotating the mesh
+instead would change the discretisation along with the physics.
+
+**Moment reference.** The quarter chord by convention, and adjustable on a
+slider. For a thin section in attached flow the aerodynamic centre sits very
+close to *x/c* = 0.25, which makes the moment about it nearly independent of
+incidence — a property of the section rather than a number that moves with every
+degree of alpha.
+
+Two sparklines trace *C<sub>l</sub>* and *C<sub>d</sub>* against extraction
+number. A coefficient still drifting once the residuals have flattened has not
+converged, whatever the residuals say, and only a trace shows that.
+
 ### Viewport controls
 
 | Input | Action |
@@ -459,6 +509,114 @@ checkerboarding, and the residual band corresponds to a mass imbalance of
 around 0.02–0.1% of the inflow. It is a convergence defect, not a wrong answer,
 and it is unresolved. `JOURNAL.md` §6 records what was ruled out.
 
+### Force validation
+
+The exact checks impose a field whose force is known in closed form and require
+the integral to reproduce it to round-off:
+
+| Check | Why it is exact | Result |
+|---|---|---|
+| Uniform pressure exerts no net force | ∮ **n** d*s* = 0 for a closed contour | 10⁻¹² |
+| …at any reference level | the constant cancels | 10⁻⁹ |
+| Still fluid exerts no friction | no velocity gradient, no shear | 10⁻¹⁴ |
+| Pressure + friction = total | the split must be a split | 10⁻¹² |
+| Wind axes preserve force magnitude | a rotation cannot change a length | 10⁻¹² |
+| Moving the reference by **d** shifts the moment by **d** × **F** | the definition of a moment | 10⁻¹² |
+
+The first is the sharpest instrument available on this code: any error in a
+normal, a face length or a sign shows up there and nowhere else.
+
+The solved checks run the real thing:
+
+| Case | Expected | Result |
+|---|---|---|
+| NACA 0012, α = 0° | no lift, no moment, positive drag | C<sub>l</sub> = 4×10⁻⁵, |C<sub>m</sub>| < 10⁻⁵ |
+| α = ±8° | lift reverses exactly with the mirror image | C<sub>l</sub> equal and opposite |
+| α = 2° → 8° | more incidence, more lift | C<sub>l</sub> 0.111 → 0.425 |
+| 700 vs 1400 iterations | the answer settles as the solve does | within 2×10⁻² |
+
+**Sweeping incidence**, NACA 0012 at Re = 500 on the coarse C-grid:
+
+| α | C<sub>l</sub> | C<sub>d</sub> | C<sub>d</sub> pressure | C<sub>d</sub> friction | C<sub>m</sub> c/4 | L/D |
+|---|---|---|---|---|---|---|
+| 0° | +0.00004 | 0.1859 | 0.0514 | 0.1345 | −0.0000 | — |
+| 2° | +0.1111 | 0.1881 | 0.0542 | 0.1339 | +0.0023 | 0.59 |
+| 4° | +0.2220 | 0.1949 | 0.0627 | 0.1322 | +0.0037 | 1.14 |
+| 8° | +0.4249 | 0.2201 | 0.0956 | 0.1245 | +0.0039 | 1.93 |
+| 12° | +0.5807 | 0.2608 | 0.1466 | 0.1142 | +0.0001 | 2.23 |
+
+Four things in that table are worth reading, none of which is asserted anywhere
+in the code:
+
+- **The lift-curve slope falls off.** 0.0555 per degree from 0° to 4°, 0.039
+  from 8° to 12°. That is the onset of stall, and it tracks separation moving
+  forward from x/c = 0.69 to 0.39 over the same range.
+- **Pressure drag nearly triples** while separation spreads, 0.051 → 0.147.
+- **Friction drag falls** as it does, 0.134 → 0.114: separated flow drags on the
+  skin far less than attached flow.
+- **C<sub>m</sub> about the quarter chord stays within 0.004 of zero** at every
+  incidence. For a symmetric section the aerodynamic centre is at the quarter
+  chord, so that is precisely what it should do — an independent check on the
+  moment integration that no single-incidence test could give.
+
+One external cross-check, not a test because an aerofoil is not a flat plate:
+laminar flat-plate theory gives a total skin-friction coefficient of
+2 × 1.328/√Re = 0.119 at Re = 500. The computed friction drag at zero incidence
+is 0.134, about 13% higher — the direction and size expected for a 12% thick
+section with 2% more wetted area and favourable-gradient acceleration over the
+forward half.
+
+The lift-curve slope is roughly half the thin-aerofoil value of 2π per radian.
+That is expected at Re = 500, where the boundary layer is a substantial
+fraction of the section thickness and decambers it, and it is a reminder that
+these are laminar low-Reynolds-number answers, not aerofoil-handbook ones.
+
+## Performance
+
+The solver runs on a thread of its own. One SIMPLE outer iteration on the fine
+C-grid — 105,410 cells, 211,777 faces — takes around 180 ms, and running five of
+those inside the frame callback redrew the window roughly once a second: panning,
+zooming and even dragging a splitter stopped responding exactly when the
+application was working hardest.
+
+Frame times while a solve is running, measured with `--frame-stats`:
+
+| Case | Before | After |
+|---|---|---|
+| Coarse (8,658 cells), solving | 80.8 ms (12 fps) | **0.47 ms** |
+| Fine (105,410 cells), solving | 905 ms (1 fps) | **1.76 ms** |
+| Fine, rendering only | 11.5 ms | **3.74 ms** |
+
+Four changes, in the order they mattered:
+
+1. **The solver moved off the render thread.** It iterates on its own copy of
+   the field and publishes complete snapshots under a mutex; the UI moves them
+   out, so the render thread pays a pointer swap rather than a copy. The mesh
+   became a `shared_ptr<const Mesh>` so that regenerating the grid cannot pull
+   it out from under a running solve.
+2. **Solve mode is capped at 60 fps.** With the solver on its own thread,
+   redrawing faster buys nothing and takes a core away from the solve. Vsync
+   normally imposes a similar limit but does not when the window is hidden or
+   occluded — which is when spinning is both most wasteful and least visible.
+3. **The shaded field is cached in a texture.** It was two triangles per cell
+   re-emitted every frame — 210,820 triangles at the fine resolution — to
+   produce an identical picture. It is now drawn once into an offscreen target
+   and blitted as a single quad, rebuilt only when the mesh, the field values,
+   the scalar shown, the colour range, the camera or the viewport changes.
+4. **Grid lines are cached and streamline tracing is throttled.** The projected
+   grid lines are rebuilt only when the mesh or the view changes. Streamlines
+   integrate thousands of RK4 steps and the field arrives from the solver many
+   times a second, so while a solve runs they are refreshed on a timer and
+   brought fully up to date the moment it stops.
+
+The solve itself is unchanged and produces bit-identical results: NACA 0012 at
+Re = 500 and α = 8° still converges in 1,208 iterations to a continuity residual
+of 9.968×10⁻⁷ with separation at x/c = 0.6923.
+
+The panel reports whether the field image was redrawn or reused, because a
+cached image that is silently wrong and one that is correctly cached look
+identical.
+
 ## Dependencies
 
 | Library | Version | Role | Fetched |
@@ -473,13 +631,13 @@ reproduces the exact same sources or fails loudly.
 
 ## Roadmap
 
-Phases 0 to 5 are complete. Later phases build on them in order:
+Phases 0 to 6 are complete. Later phases build on them in order:
 
 1. ~~NACA 4-digit geometry generation~~ — done
 2. ~~Mesh generation around the section~~ — done
 3. ~~Navier-Stokes discretisation~~ — done (laminar, SIMPLE)
 4. ~~Viscous flow around an aerofoil: Cp, Cf, wall shear, separation~~ — done
-5. Force and moment integration (lift, drag, moment coefficients)
+5. ~~Force and moment integration (lift, drag, moment coefficients)~~ — done
 6. Reynolds averaging (RANS)
 7. k-ω SST turbulence closure
 8. Vortex structures and stall behaviour
