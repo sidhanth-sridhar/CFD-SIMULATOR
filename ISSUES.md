@@ -27,97 +27,23 @@ Severity is about consequence, not effort:
 
 ## Open
 
-### #1 — Zero incidence does not converge in continuity
-**Severity:** degraded · **Found:** Phase 4 · **Area:** solver
-
-At exactly α = 0 the continuity residual falls to a few times 10⁻⁴ and then
-oscillates in a band rather than continuing down, while both momentum residuals
-keep falling monotonically:
-
-```
-iteration  500: continuity 6.223e-04, momentum 1.255e-05 / 3.335e-06
-iteration 1500: continuity 5.298e-04, momentum 8.768e-06 / 3.377e-06
-iteration 2500: continuity 1.267e-03, momentum 6.923e-06 / 4.098e-06
-iteration 3500: continuity 6.092e-04, momentum 4.452e-06 / 2.594e-06
-iteration 5000: continuity 2.408e-04, momentum 2.105e-06 / 1.480e-06
-```
-
-Phase 4 recorded this as "converging, slowly". That was wrong, and the periodic
-progress log added in Phase 5 is what showed it: this is a limit cycle in mass
-conservation, not slow convergence.
-
-**Ruled out**
-
-- *Mesh resolution.* Medium (30,530 cells, 69.5° non-orthogonality) behaves
-  identically to coarse (8,658 cells, 79.9°).
-- *Non-orthogonal correction.* Raising `nonOrthogonalCorrectors` from 1 to 3
-  made it slightly worse.
-- *A general solver defect.* Cases at incidence converge to 10⁻⁶ normally:
-  α = 2° in 3,322 iterations, 4° in 1,837, 8° in 1,208, 12° in 1,131. The
-  trouble fades in rather than switching on — α = 0.5° reached 3.8×10⁻⁷ in
-  continuity and missed the tolerance only on momentum.
-- *Physical unsteadiness.* At Re = 500 a 12% section at zero incidence has a
-  steady solution; shedding from a streamlined body needs a far higher Reynolds
-  number.
-
-**Where the imbalance lives.** The divergence view at α = 0 after 5,000
-iterations shows a peak of 2.7×10⁻³ s⁻¹ against a freestream scale
-U/c = 50 s⁻¹ — five parts in 10⁵ — spread thinly along the surface and through
-the wake rather than concentrated in a few cells.
-
-**Consequence.** The fields at α = 0 are still symmetric, attached and
-checkerboard-free, and the band corresponds to a mass imbalance of 0.02–0.1% of
-the inflow. C<sub>l</sub> comes out at 4×10⁻⁵ and C<sub>m</sub> below 10⁻⁵,
-which is the right answer. So this is a convergence defect rather than a wrong
-answer — but the first row of any polar starting at 0° is marked
-`converged,no`, and that is correct.
-
-**Next thing to try.** Measure the mass imbalance per boundary patch rather
-than looking at a picture of it: specifically, whether the flux through each
-wake-cut face and its partner cancels exactly. The standing hypothesis is an
-antisymmetric mode across the cut, sustained because Gauss-Seidel sweeps cells
-in index order (not a symmetric operation) and the pressure conjugate-gradient
-sees it as consistent — which would explain why it is worst where the symmetry
-is exact and fades as incidence breaks it.
-
----
-
 ### #3 — No grid-convergence study of the force coefficients
-**Severity:** degraded · **Found:** Phase 6 · **Area:** validation
+**Severity:** degraded · **Found:** Phase 6 · **Area:** validation · **Status:** measured, see below
 
 The coefficients are shown to settle in *iteration* — 700 versus 1,400
-iterations agree to 2×10⁻² — but never in *mesh resolution*. Those are different
-claims, and only the second says the numbers are converged in any useful sense.
+iterations agree to 2×10⁻² — but that is a different claim from settling in
+*mesh resolution*.
 
-Every coefficient quoted in `README.md` and `JOURNAL.md` is from the coarse
-grid. They are internally consistent and physically sensible; they are not
-demonstrated to be grid-independent.
+Measured at α = 8°, Re = 500 (see `README.md` for the table): C<sub>l</sub>
+moves by well under a percent between coarse and medium, C<sub>d</sub> by a few
+percent. So the lift is grid-independent at the resolutions used and the drag is
+not fully. Every coefficient quoted in the documentation is from the coarse
+grid, and should be read as carrying a few percent of grid error in
+C<sub>d</sub>.
 
-**Fix direction.** Run one incidence at coarse, medium and fine, and report how
-C<sub>l</sub> and C<sub>d</sub> move. Cheap to do and it either closes the gap
-or discovers something.
-
----
-
-### #5 — Wall shear uses a first-order one-sided difference
-**Severity:** degraded · **Found:** Phase 5 · **Area:** post
-
-τ<sub>w</sub> is taken as the first cell's wall-parallel velocity divided by its
-distance from the wall. That is first-order accurate. It is defensible at a
-first-layer height of 10⁻³ c, and the resulting friction drag at Re = 500 sits
-13% above flat-plate theory in the direction and by the amount a 12% thick
-section should — but it is the least accurate step in the whole
-surface-quantity chain, and both C<sub>f</sub> and the separation station
-inherit its error.
-
----
-
-### #6 — Only built and run on one platform
-**Severity:** degraded · **Area:** build
-
-macOS 15.7, arm64, Apple Clang 17. The CMake is written to be portable and
-`CFD_BUILD_APP=OFF` builds headlessly, but no other compiler or operating
-system has been tried, so "portable" is an intention rather than a fact.
+Left open rather than closed because a proper study would fit an observed order
+of convergence over three or more systematically refined grids, and this is
+three presets that differ in more than one way at once.
 
 ---
 
@@ -134,6 +60,7 @@ Not defects. Listed so they are not mistaken for any.
 | **NACA four-digit sections only** | The geometry generator implements one family. |
 | **No comparison against external data** | Nothing here has been checked against a wind tunnel or another CFD code. Every validation is either an exact identity, an analytic solution, or an internal consistency check. |
 | **Coarse-grid results throughout** | See [#3](#3--no-grid-convergence-study-of-the-force-coefficients). |
+| **Built and run on one platform only** | macOS 15.7, arm64, Apple Clang 17. Not a known defect: the platform-specific code is isolated behind `__APPLE__` and `_WIN32` guards, GLFW and OpenGL are confined to `cfd_app`, and `-DCFD_BUILD_APP=OFF` builds the whole numerical stack headlessly and passes all 251 tests with `-Werror`. But no other compiler or operating system has been compiled against, so portability is a design intention with one data point behind it. |
 
 ---
 
@@ -219,6 +146,13 @@ Not defects. Listed so they are not mistaken for any.
 | 45 | The loop free-ran at ~117 fps during a solve, taking a core from it | Vsync normally caps this, but not when the window is hidden or occluded — precisely when spinning is most wasteful and least visible | Wait out the remainder of a 60 Hz interval with `glfwWaitEventsTimeout`, so input still returns early |
 | 46 | The 60 fps cap delivered 41 fps | The interval was measured from the *end* of the previous frame, so it was added on top of the frame's own cost | Measure from the start of the previous frame |
 | 47 | **The shaded field drew at half scale in a ragged patch** in the middle of the viewport | The offscreen target is sized in framebuffer pixels and the camera scale is in ImGui points; on a Retina display those differ by 2×. The ragged edge was the giveaway: cells were culled against the *camera's* visible bounds while being drawn into a texture covering twice that area, so the cull boundary appeared inside the picture | Carry the scale in framebuffer pixels throughout. The shape of the artefact named the bug faster than reading the code would have |
+
+### Solver correctness
+
+| # | Issue | Root cause | Fix |
+|---|---|---|---|
+| 1 | **Zero incidence never converged**: continuity fell to a few times 10⁻⁴ and then oscillated in a band forever, while momentum converged normally. Mesh-independent, unaffected by the non-orthogonal corrector count, and it faded in as incidence grew rather than switching on | The far-field boundary condition was **a discontinuous function of the solution**. A far-field face acts as an inlet or an outlet depending on which way the stream crosses it, and the solver decided that every iteration from the raw sign of the current flux. On a face the flow runs *parallel* to, that flux hovers around zero, so the face flipped between imposing a velocity and imposing a pressure from one iteration to the next — two different discretisations, alternating. At exactly zero incidence that is the entire top and bottom of the C-grid: **222 of 222 far-field faces**. No amount of iterating can settle a problem whose boundary conditions change under it | A dead band a thousandth of the freestream flux wide, computed once from the geometry and the oncoming stream rather than from the current iterate. A face is an outlet only when fluid is unambiguously leaving; far from the body the flow *is* the freestream, so imposing it on a tangential face is both well posed and correct. Continuity now falls monotonically and α = 0 converges in 6,061 iterations to 3.3×10⁻⁷ — where it used to sit at 2.4×10⁻⁴ indefinitely. C<sub>l</sub> and C<sub>m</sub> come out at zero to five decimals. Guarded by a test that fails against the old behaviour |
+| 5 | Wall shear was only first-order accurate | τ<sub>w</sub> was the first cell's wall-parallel speed over its distance from the wall. C<sub>f</sub>, the friction drag and the separation station all inherited an error proportional to the first-layer height | The gradient now comes from a parabola fitted through three known points — zero at the wall and the first two cells out — which is second-order accurate on the graded spacing a boundary-layer mesh always has. The second cell is found by geometry (the owner's face whose outward normal points most nearly away from the wall), so it does not depend on the grid being structured. Guarded by a test on a profile *a·d + b·d²*, whose wall gradient is exactly *a*: the one-sided difference is 50% out on it, the parabola within 1% |
 
 ### Phase 7 — polars
 
