@@ -1173,7 +1173,8 @@ bool updateSolver(UiState& ui) {
   // Collect whatever the worker has finished since the last frame. Everything
   // below this point runs on data the worker is no longer touching.
   SolverUpdate update;
-  if (state.worker.poll(update)) {
+  const bool collected = state.worker.poll(update);
+  if (collected) {
     state.monitor = update.monitor;
     state.iteration = update.iteration;
     state.converged = update.converged;
@@ -1204,9 +1205,23 @@ bool updateSolver(UiState& ui) {
     ui.surface.dirty = true;
   }
 
-  // The worker decides when a run is over, so read the answer from it rather
-  // than keeping a second copy here that could disagree.
-  state.running = state.worker.isRunning();
+  // "Is it still running" is read from the snapshot, not from the worker's
+  // atomic - because the two have to describe the same instant.
+  //
+  // The worker clears its running flag and then takes a lock to publish the
+  // final field. A reader that checks the flag directly can land in between:
+  // it sees "stopped", polls nothing, and concludes the run ended on whatever
+  // field it happened to be holding - one publication interval stale. During a
+  // polar sweep that stale field is then carried into the next angle as its
+  // initial guess, and a sweep that diverged at 4 degrees on one run converged
+  // on the next from identical inputs. A snapshot carries the field and the
+  // state together, which is the whole point of taking one.
+  //
+  // A run the user paused produces no snapshot, so `running` is left alone and
+  // the button that requested the pause is the thing that cleared it.
+  if (collected) {
+    state.running = update.running;
+  }
   return state.running;
 }
 
