@@ -470,6 +470,10 @@ Status Application::initialize(const ApplicationOptions& options) {
     impl_->ui.flow.dirty = true;
   }
 
+  if (options.maxIterations > 0) {
+    impl_->ui.solving.maxIterations = options.maxIterations;
+  }
+
   if (options.angleGiven) {
     impl_->ui.flow.freestream.angleOfAttackDeg = options.angleOfAttackDeg;
     impl_->ui.flow.dirty = true;

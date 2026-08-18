@@ -177,8 +177,25 @@ Result<FaceState> evaluateFaces(const mesh::Mesh& mesh, const FlowField& field,
         // Decide per face which way the stream is crossing this boundary. The
         // normal points out of the domain, so a negative dot product means
         // fluid is coming in.
+        //
+        // A face the stream runs *parallel* to is the interesting case, and
+        // getting it wrong is expensive. Comparing against zero puts every
+        // tangential face on the outflow side, where pressure is imposed and
+        // the velocity is left free - so a long stretch of boundary the flow
+        // merely slides past becomes a surface mass can breathe through, with
+        // nothing to damp it. On a C-grid at exactly zero incidence that is the
+        // entire top and bottom of the domain, and it is why alpha = 0 would
+        // sit in a continuity limit cycle while every other incidence
+        // converged: at incidence those faces classify decisively and the
+        // problem disappears.
+        //
+        // Far from the body the flow *is* the freestream, so imposing it on a
+        // tangential face is both well posed and correct. Only where fluid is
+        // definitely leaving does a pressure condition become necessary, to
+        // avoid over-constraining the exit.
+        constexpr double kTangentialFraction = 1.0e-3;
         const double outward = dot(streamVelocity, mesh.faceNormals()[f]);
-        const bool entering = outward < 0.0;
+        const bool entering = outward < kTangentialFraction * freestream.speed;
         state.inflow[f] = entering ? char{1} : char{0};
 
         if (entering) {

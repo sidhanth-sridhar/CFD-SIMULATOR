@@ -68,6 +68,9 @@ struct ApplicationOptions {
   /// Reynolds number based on the chord. Zero keeps the default.
   double reynoldsNumber{0.0};
 
+  /// Outer-iteration ceiling for each solve. Zero keeps the default.
+  long long maxIterations{0};
+
   /// Angle of attack in degrees. Zero is a legitimate value, so a separate
   /// flag says whether one was asked for at all.
   double angleOfAttackDeg{0.0};

@@ -278,7 +278,12 @@ struct SolverState {
   double convergenceTolerance{1e-6};
   /// Stop after this many outer iterations regardless. A run that is not
   /// converging should end and say so rather than spin indefinitely.
-  long long maxIterations{5000};
+  ///
+  /// Ten thousand rather than five: with the far-field chattering fixed the
+  /// residuals now fall monotonically, so a long run is a slow one rather than
+  /// a stuck one, and zero incidence on the coarse grid genuinely needs about
+  /// six thousand. Settable from the command line with --max-iterations.
+  long long maxIterations{10000};
   bool converged{false};
   bool hitIterationLimit{false};
   /// The last run blew up. Distinct from `errorMessage` being non-empty, which

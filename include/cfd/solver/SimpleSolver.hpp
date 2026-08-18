@@ -210,6 +210,20 @@ class SimpleSolver {
   std::vector<double> momentumDiagonal_;
   std::vector<double> netFlux_;
 
+  /// Smallest outward flux, per far-field face, that counts as fluid genuinely
+  /// leaving. Zero for every other face.
+  ///
+  /// A far-field face acts as an inlet or an outlet depending on which way the
+  /// stream crosses it, and deciding that from the sign of the current flux
+  /// makes the boundary condition a discontinuous function of the solution.
+  /// Where the flow runs *parallel* to the boundary the flux hovers around
+  /// zero, so the face flips between imposing a velocity and imposing a
+  /// pressure from one iteration to the next - two different discretisations,
+  /// alternating, which no amount of iterating can settle. A dead band a
+  /// fraction of the freestream flux wide stops the chattering: a face is an
+  /// outlet only when fluid is unambiguously leaving through it.
+  std::vector<double> farFieldDeadBand_;
+
   /// True when at least one boundary face fixes a pressure. Without one the
   /// pressure level is arbitrary and has to be handled explicitly.
   bool hasPressureReference_{false};

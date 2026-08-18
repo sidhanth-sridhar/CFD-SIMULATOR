@@ -41,6 +41,7 @@ struct Options {
   bool initialiseFlow{false};
   bool startSolver{false};
   double reynoldsNumber{0.0};
+  long long solverMaxIterations{0};
   double angleOfAttackDeg{0.0};
   bool angleGiven{false};
   bool runPolarSweep{false};
@@ -70,6 +71,7 @@ void printUsage() {
       "      --solve             Start the solver running (implies --flow)\n"
       "      --reynolds N        Reynolds number based on the chord\n"
       "      --alpha DEG         Angle of attack in degrees\n"
+      "      --max-iterations N  Outer-iteration ceiling for each solve\n"
       "      --polar A:B:S       Sweep incidence from A to B in steps of S degrees,\n"
       "                          write the polar and exit (implies --flow)\n"
       "      --polar-csv FILE    Where the sweep writes its CSV\n"
@@ -124,6 +126,17 @@ cfd::Result<Options> parseArguments(std::span<const std::string_view> args) {
       if (!(options.reynoldsNumber > 0.0)) {
         return cfd::Error{cfd::ErrorCode::InvalidArgument,
                           "--reynolds must be a positive number"};
+      }
+    } else if (arg == "--max-iterations") {
+      if (i + 1 >= args.size()) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          "--max-iterations requires a count"};
+      }
+      ++i;
+      options.solverMaxIterations = std::atoll(std::string{args[i]}.c_str());
+      if (options.solverMaxIterations < 1) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          "--max-iterations must be at least 1"};
       }
     } else if (arg == "--alpha") {
       if (i + 1 >= args.size()) {
@@ -336,6 +349,7 @@ int main(int argc, char** argv) {
     appOptions.initialFieldView = options.fieldView;
     appOptions.startSolver = options.startSolver;
     appOptions.reynoldsNumber = options.reynoldsNumber;
+    appOptions.maxIterations = options.solverMaxIterations;
     appOptions.angleOfAttackDeg = options.angleOfAttackDeg;
     appOptions.angleGiven = options.angleGiven;
     appOptions.runPolarSweep = options.runPolarSweep;

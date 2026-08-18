@@ -1095,10 +1095,12 @@ void updateFlow(UiState& ui) {
 
   CFD_LOG_INFO(kLogCategory,
                "flow {}: U {:.4g} m/s at {:.2f} deg, Re {:.3g}, mu {:.3e} Pa.s, "
-               "continuity residual {:.3e}, max |div u| {:.3e} 1/s",
+               "far field {} in / {} out, continuity residual {:.3e}, "
+               "max |div u| {:.3e} 1/s",
                continued ? "continued from the previous solution" : "initialised",
                state.freestream.speed, state.freestream.angleOfAttackDeg,
                state.freestream.reynoldsNumber, state.freestream.dynamicViscosity(chord),
+               state.counts.farFieldIn, state.counts.farFieldOut,
                state.residuals.continuity, flow::maxAbsDivergence(state.divergence));
 }
 

@@ -440,6 +440,70 @@ TEST(Validation, ResidualsFallMonotonicallyAndMassIsConserved) {
 // forced two real fixes - coupling the wake cut through the pressure equation,
 // and stopping the far-field wake boundary from inheriting the trailing edge's
 // 1e-4 chord clustering - so it is worth guarding against regression.
+// The far-field boundary condition must not depend on the sign of a flux that
+// is essentially zero.
+//
+// A far-field face acts as an inlet or an outlet depending on which way the
+// stream crosses it. Deciding that from the raw sign of the current flux makes
+// the boundary condition a discontinuous function of the solution, and on a
+// face the flow runs *parallel* to, the flux hovers around zero and the face
+// flips between imposing a velocity and imposing a pressure every iteration.
+// At zero incidence that is the entire top and bottom of a C-grid - 222 of the
+// 222 far-field faces - and the result was a continuity residual that sat in a
+// band around 5e-4 forever while momentum converged normally.
+//
+// A dead band a thousandth of the freestream flux wide fixes it. This test is
+// the guard: with the chattering, continuity stalls near 1e-4 and wanders;
+// without it, it falls monotonically by orders of magnitude.
+TEST(Validation, ZeroIncidenceDrivesContinuityDownRatherThanOscillating) {
+  auto section = cfd::geom::makeNaca4Digit(
+      "0012", {.chord = 1.0, .trailingEdge = cfd::geom::TrailingEdge::Closed});
+  ASSERT_TRUE(section);
+
+  cfd::mesh::CGridOptions options =
+      cfd::mesh::optionsFor(cfd::mesh::MeshResolution::Coarse);
+  options.surfacePoints = 40;
+  options.wakePoints = 20;
+  options.normalPoints = 28;
+  auto grid = cfd::mesh::generateCGrid(section.value(), options);
+  ASSERT_TRUE(grid) << (grid.hasError() ? grid.error().format() : "");
+  const Mesh& mesh = grid.value();
+
+  cfd::flow::FreestreamConditions stream;
+  stream.speed = 1.0;
+  stream.density = 1.0;
+  stream.reynoldsNumber = 500.0;
+  stream.angleOfAttackDeg = 0.0;  // exactly zero: the case that used to stall
+
+  auto conditions =
+      cfd::flow::buildFaceConditions(mesh, cfd::flow::BoundaryConditions{}, stream);
+  ASSERT_TRUE(conditions);
+  auto created = SimpleSolver::create(mesh, conditions.value(), SimpleSettings{});
+  ASSERT_TRUE(created);
+  SimpleSolver& solver = created.value();
+
+  auto initial = FlowField::uniform(mesh.cellCount(), stream, 1.0);
+  ASSERT_TRUE(initial);
+  ASSERT_TRUE(solver.initialise(initial.value()));
+
+  double early = 0.0;
+  double late = 0.0;
+  for (int i = 0; i < 1200; ++i) {
+    const SolverMonitor monitor = solver.iterate();
+    ASSERT_TRUE(std::isfinite(monitor.residuals.continuity)) << "diverged at " << i;
+    if (i == 199) {
+      early = monitor.residuals.continuity;
+    }
+    late = monitor.residuals.continuity;
+  }
+
+  // Falling, not sitting in a band. The old behaviour gave late/early around
+  // one, and often above it, because the residual was oscillating.
+  EXPECT_LT(late, early * 0.2)
+      << "continuity is not coming down: " << early << " -> " << late;
+  EXPECT_LT(late, 1e-5) << "continuity stalled at " << late;
+}
+
 TEST(Validation, AerofoilCGridStaysStableAndReducesResiduals) {
   auto section = cfd::geom::makeNaca4Digit(
       "0012", {.chord = 1.0, .trailingEdge = cfd::geom::TrailingEdge::Closed});

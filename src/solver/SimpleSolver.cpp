@@ -50,6 +50,9 @@ Result<SimpleSolver> SimpleSolver::create(const mesh::Mesh& mesh,
   const std::size_t cells = mesh.cellCount();
   const std::size_t faces = mesh.faceCount();
   solver.massFlux_.assign(faces, 0.0);
+  // Sized here, filled in initialise(). imposesVelocity() indexes it and runs
+  // before that, so an empty vector would be read out of bounds.
+  solver.farFieldDeadBand_.assign(faces, 0.0);
   solver.faceU_.assign(faces, 0.0);
   solver.faceV_.assign(faces, 0.0);
   solver.faceP_.assign(faces, 0.0);
@@ -135,6 +138,29 @@ Status SimpleSolver::initialise(const flow::FlowField& initial) {
   }
   field_ = initial;
 
+  // Dead band for the far-field inflow/outflow decision, scaled by the flux the
+  // freestream would push through each face. Computed once, and before anything
+  // reads it: it is a property of the boundary and the oncoming stream, not of
+  // the current iterate, and making it depend on the iterate is exactly the
+  // chattering it exists to prevent.
+  {
+    constexpr double kFarFieldTangentialFraction = 1.0e-3;
+    const mesh::Mesh& grid = *mesh_;
+    double referenceSpeed = 0.0;
+    for (std::size_t c = 0; c < grid.cellCount(); ++c) {
+      referenceSpeed = std::max(referenceSpeed, length(field_.velocity[c]));
+    }
+    std::fill(farFieldDeadBand_.begin(), farFieldDeadBand_.end(), 0.0);
+    for (std::size_t f = 0; f < grid.faceCount(); ++f) {
+      if (conditions_[f].kind != flow::BoundaryKind::FarField) {
+        continue;
+      }
+      const auto owner = static_cast<std::size_t>(grid.faces()[f].owner);
+      farFieldDeadBand_[f] = kFarFieldTangentialFraction * field_.density[owner] *
+                             referenceSpeed * length(geometry_[f].area);
+    }
+  }
+
   interpolateFaceValues();
 
   // Seed the face fluxes from the starting field. In a collocated method the
@@ -177,8 +203,9 @@ bool SimpleSolver::imposesVelocity(std::size_t face) const {
       return true;
     case flow::BoundaryKind::FarField:
       // The outer boundary of an external flow takes fluid in at the front and
-      // lets it out behind, so the condition follows the current flux.
-      return massFlux_[face] < 0.0;
+      // lets it out behind, so the condition follows the current flux - but
+      // only once that flux is unambiguous. See farFieldDeadBand_.
+      return massFlux_[face] < farFieldDeadBand_[face];
     case flow::BoundaryKind::Outlet:
     case flow::BoundaryKind::Internal:
       return false;
