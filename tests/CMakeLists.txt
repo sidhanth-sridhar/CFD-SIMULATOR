@@ -23,6 +23,7 @@ add_executable(cfd_tests
     Naca4Tests.cpp
     PolarTests.cpp
     SolverTests.cpp
+    TurbulenceTests.cpp
     SurfaceDataTests.cpp
     ValidationTests.cpp)
 

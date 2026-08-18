@@ -137,6 +137,10 @@ Status SimpleSolver::initialise(const flow::FlowField& initial) {
                              initial.size(), mesh_->cellCount())};
   }
   field_ = initial;
+  // The field's viscosity is molecular until a model says otherwise. Keeping a
+  // copy is what lets field_.viscosity carry mu + mu_t from here on without
+  // losing the mu a model needs for its own diffusion and Reynolds numbers.
+  molecularViscosity_ = field_.viscosity;
 
   // Dead band for the far-field inflow/outflow decision, scaled by the flux the
   // freestream would push through each face. Computed once, and before anything
@@ -193,7 +197,51 @@ Status SimpleSolver::initialise(const flow::FlowField& initial) {
     referenceMassFlow_ = 1.0;
   }
 
+  if (turbulence_ != nullptr) {
+    if (const Status ready =
+            turbulence_->initialise(mesh, conditions_, field_, settings_.inflow);
+        !ready) {
+      return ready.error();
+    }
+    applyEddyViscosity();
+  }
+
   return Status::ok();
+}
+
+Status SimpleSolver::setTurbulenceModel(std::unique_ptr<TurbulenceModel> model) {
+  turbulence_ = std::move(model);
+  if (turbulence_ == nullptr) {
+    // Back to laminar: drop any eddy viscosity the previous model had added.
+    field_.viscosity = molecularViscosity_;
+    return Status::ok();
+  }
+  if (mesh_ == nullptr || molecularViscosity_.empty()) {
+    // Attached before initialise(), which is the normal order; the model is
+    // brought up there.
+    return Status::ok();
+  }
+  if (const Status ready = turbulence_->initialise(*mesh_, conditions_, field_, settings_.inflow);
+      !ready) {
+    return ready.error();
+  }
+  applyEddyViscosity();
+  return Status::ok();
+}
+
+void SimpleSolver::applyEddyViscosity() {
+  if (turbulence_ == nullptr) {
+    return;
+  }
+  const std::vector<double>& eddy = turbulence_->eddyViscosity();
+  if (eddy.size() != field_.viscosity.size()) {
+    return;
+  }
+  // The one line that connects a turbulence model to the momentum equations.
+  // Everything else in this file is unaware that turbulence exists.
+  for (std::size_t c = 0; c < field_.viscosity.size(); ++c) {
+    field_.viscosity[c] = molecularViscosity_[c] + eddy[c];
+  }
 }
 
 bool SimpleSolver::imposesVelocity(std::size_t face) const {
@@ -705,6 +753,41 @@ SolverMonitor SimpleSolver::iterate() {
   const std::vector<double> divergenceField = divergence();
   for (const double value : divergenceField) {
     monitor.maxDivergence = std::max(monitor.maxDivergence, std::abs(value));
+  }
+
+
+  // --- turbulence ---
+  //
+  // Last, and on the corrected field: the model's own equations are convected
+  // by the same face fluxes the momentum equations used, so they have to see
+  // the fluxes *after* continuity has been enforced on them. Feeding a model
+  // fluxes that do not conserve mass is a reliable way to make k and omega
+  // diverge for reasons that have nothing to do with turbulence.
+  if (turbulence_ != nullptr) {
+    TurbulenceContext context;
+    context.mesh = mesh_;
+    context.field = &field_;
+    context.conditions = &conditions_;
+    context.massFlux = &massFlux_;
+    context.gradU = &gradU_;
+    context.gradV = &gradV_;
+    context.molecularViscosity = &molecularViscosity_;
+    context.relaxation = settings_.turbulenceRelaxation;
+
+    turbulence_->update(context);
+    applyEddyViscosity();
+
+    const TurbulenceResiduals turbulent = turbulence_->residuals();
+    monitor.turbulence = turbulent;
+    monitor.maxEddyViscosityRatio = 0.0;
+    const std::vector<double>& eddy = turbulence_->eddyViscosity();
+    for (std::size_t c = 0; c < eddy.size(); ++c) {
+      const double mu = molecularViscosity_[c];
+      if (mu > 0.0) {
+        monitor.maxEddyViscosityRatio =
+            std::max(monitor.maxEddyViscosityRatio, eddy[c] / mu);
+      }
+    }
   }
 
   return monitor;

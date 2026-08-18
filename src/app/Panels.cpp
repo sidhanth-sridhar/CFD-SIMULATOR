@@ -926,6 +926,14 @@ void updateGeometry(UiState& ui) {
   ui.meshing.dirty = true;
 }
 
+std::string_view toString(TurbulenceChoice choice) noexcept {
+  switch (choice) {
+    case TurbulenceChoice::Laminar:   return "Laminar";
+    case TurbulenceChoice::KOmegaSST: return "k-omega SST";
+  }
+  return "Laminar";
+}
+
 std::string_view toString(FieldView view) noexcept {
   switch (view) {
     case FieldView::VelocityMagnitude: return "Velocity magnitude";
@@ -1147,6 +1155,22 @@ bool updateSolver(UiState& ui) {
       state.errorMessage = created.error().message();
       return false;
     }
+
+    // Attached before initialise(), which is where the model is brought up on
+    // the starting field. The solver holds the interface, not the type.
+    std::unique_ptr<solver::TurbulenceModel> model;
+    switch (state.turbulence) {
+      case TurbulenceChoice::Laminar:
+        break;
+      case TurbulenceChoice::KOmegaSST:
+        model = std::make_unique<solver::KOmegaSST>();
+        break;
+    }
+    if (const Status attached = created.value().setTurbulenceModel(std::move(model));
+        !attached) {
+      state.errorMessage = attached.error().message();
+      return false;
+    }
     if (const Status started = created.value().initialise(*ui.flow.field); !started) {
       state.errorMessage = started.error().message();
       return false;
@@ -1179,6 +1203,8 @@ bool updateSolver(UiState& ui) {
   const bool collected = state.worker.poll(update);
   if (collected) {
     state.monitor = update.monitor;
+    state.eddyViscosityRatio = update.maxEddyViscosityRatio;
+    state.wallYPlus = update.wallYPlus;
     state.iteration = update.iteration;
     state.converged = update.converged;
     state.hitIterationLimit = update.hitIterationLimit;

@@ -6,7 +6,9 @@
 
 add_library(cfd_solver STATIC
     Gradient.cpp
+    KOmegaSST.cpp
     LinearSystem.cpp
+    TurbulenceModel.cpp
     SimpleSolver.cpp)
 
 add_library(cfd::solver ALIAS cfd_solver)

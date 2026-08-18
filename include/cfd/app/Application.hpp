@@ -71,6 +71,17 @@ struct ApplicationOptions {
   /// Outer-iteration ceiling for each solve. Zero keeps the default.
   long long maxIterations{0};
 
+  /// Turbulence closure: "laminar" or "sst". Empty keeps the default.
+  std::string turbulenceModel{};
+
+  /// Convection scheme: "upwind" or "second". Empty keeps the default.
+  std::string convectionScheme{};
+
+  /// First cell height off the wall, as a fraction of chord. Zero keeps the
+  /// resolution preset's value. A low-Reynolds wall treatment needs y+ of order
+  /// one, which at Re = 10^6 means around 2.5e-5 - far finer than any preset.
+  double firstLayerHeight{0.0};
+
   /// Angle of attack in degrees. Zero is a legitimate value, so a separate
   /// flag says whether one was asked for at all.
   double angleOfAttackDeg{0.0};

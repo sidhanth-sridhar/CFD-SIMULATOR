@@ -56,6 +56,7 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <vector>
 
 #include "cfd/core/Error.hpp"
@@ -64,6 +65,7 @@
 #include "cfd/flow/FlowField.hpp"
 #include "cfd/mesh/Mesh.hpp"
 #include "cfd/solver/LinearSystem.hpp"
+#include "cfd/solver/TurbulenceModel.hpp"
 
 namespace cfd::solver {
 
@@ -106,6 +108,15 @@ struct SimpleSettings {
 
   ConvectionScheme scheme{ConvectionScheme::Upwind};
 
+  /// Under-relaxation for a turbulence model's own transport equations. Lower
+  /// than the momentum value because k and omega are stiffer and strictly
+  /// positive: an overshoot there is not an inaccuracy, it is a quantity that
+  /// has stopped meaning anything.
+  double turbulenceRelaxation{0.5};
+
+  /// Freestream turbulence, used only when a model is attached.
+  TurbulenceInflow inflow{};
+
   /// Extra passes of the pressure equation that re-evaluate the
   /// non-orthogonal part of the flux. Needed on skewed meshes; the C-grid
   /// reaches 75 degrees of non-orthogonality at the trailing edge.
@@ -130,6 +141,13 @@ struct SolverMonitor {
   double maxDivergence{0.0};
   /// Conjugate-gradient iterations the pressure equation needed.
   int pressureIterations{0};
+
+  /// Residuals of the turbulence model's own equations, zero without one.
+  TurbulenceResiduals turbulence{};
+  /// Largest mu_t/mu anywhere. The headline number for whether a turbulence
+  /// model is doing anything: order 100 to 1000 in a developed boundary layer,
+  /// and order 1 means it is not.
+  double maxEddyViscosityRatio{0.0};
 };
 
 /// Steady laminar solver.
@@ -145,6 +163,18 @@ class SimpleSolver {
   /// are a primary unknown in a collocated method rather than something
   /// derived from the cell velocities on demand.
   [[nodiscard]] Status initialise(const flow::FlowField& initial);
+
+  /// Attach a turbulence closure, or pass nullptr for laminar flow.
+  ///
+  /// The solver treats this purely as a source of eddy viscosity: it calls
+  /// update() once per outer iteration and adds what comes back to the
+  /// molecular viscosity. Nothing in the momentum assembly knows which model
+  /// is attached, or whether one is.
+  [[nodiscard]] Status setTurbulenceModel(std::unique_ptr<TurbulenceModel> model);
+
+  [[nodiscard]] const TurbulenceModel* turbulenceModel() const noexcept {
+    return turbulence_.get();
+  }
 
   /// Run one outer iteration.
   ///
@@ -187,6 +217,8 @@ class SimpleSolver {
   void computeRhieChowFluxes();
   void assemblePressureCorrection();
   void correct(const std::vector<double>& pressureCorrection);
+  /// Write mu + mu_t into the field the momentum assembly reads.
+  void applyEddyViscosity();
 
   const mesh::Mesh* mesh_{nullptr};
   flow::FaceConditions conditions_;
@@ -223,6 +255,14 @@ class SimpleSolver {
   /// fraction of the freestream flux wide stops the chattering: a face is an
   /// outlet only when fluid is unambiguously leaving through it.
   std::vector<double> farFieldDeadBand_;
+
+  /// The closure, if any. Owned so the solver can be handed one and forget
+  /// which kind it is.
+  std::unique_ptr<TurbulenceModel> turbulence_;
+  /// Molecular viscosity, kept separate because field_.viscosity carries the
+  /// *effective* value once a model is attached and the model needs the
+  /// molecular part to form its own diffusion and Reynolds numbers.
+  std::vector<double> molecularViscosity_;
 
   /// True when at least one boundary face fixes a pressure. Without one the
   /// pressure level is arbitrary and has to be handled explicitly.

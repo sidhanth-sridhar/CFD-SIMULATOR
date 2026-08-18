@@ -73,6 +73,12 @@ struct SolverUpdate {
   bool diverged{false};
   /// Whether the worker was still iterating when this snapshot was taken.
   bool running{false};
+
+  /// Turbulence diagnostics, zero without a model. y+ decides whether the wall
+  /// treatment is being used inside its range of validity, and mu_t/mu says
+  /// whether the model is doing anything at all.
+  double maxEddyViscosityRatio{0.0};
+  double wallYPlus{0.0};
 };
 
 /// Drives a SimpleSolver on a background thread.

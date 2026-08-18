@@ -36,7 +36,9 @@
 #include "cfd/post/Polar.hpp"
 #include "cfd/post/Streamlines.hpp"
 #include "cfd/post/SurfaceData.hpp"
+#include "cfd/solver/KOmegaSST.hpp"
 #include "cfd/solver/SimpleSolver.hpp"
+#include "cfd/solver/TurbulenceModel.hpp"
 
 namespace cfd::app {
 
@@ -257,12 +259,31 @@ struct FlowState {
   FieldRenderer renderer;
 };
 
+/// Which closure the solver runs with.
+enum class TurbulenceChoice {
+  /// No model. Correct only where a steady laminar solution exists, which for
+  /// an aerofoil means Reynolds numbers in the hundreds, not the millions.
+  Laminar,
+  KOmegaSST,
+};
+
+[[nodiscard]] std::string_view toString(TurbulenceChoice choice) noexcept;
+
 /// The solver, its controls and its convergence history.
 struct SolverState {
   /// The solver itself lives on the worker's thread, not here. Rebuilt and
   /// re-adopted whenever the mesh, the flow or the settings change.
   SolverWorker worker;
   solver::SimpleSettings settings;
+
+  /// Chosen closure, and the freestream turbulence it starts from. Changing
+  /// either rebuilds the solver, the same as changing the mesh would.
+  TurbulenceChoice turbulence{TurbulenceChoice::Laminar};
+
+  /// Reported back from the model: how hard it is mixing, and whether the mesh
+  /// is fine enough for its wall treatment to be valid.
+  double eddyViscosityRatio{0.0};
+  double wallYPlus{0.0};
 
   /// Mirrors the worker, which is the authority: it stops itself on
   /// convergence, on the iteration limit and on divergence, so a second copy

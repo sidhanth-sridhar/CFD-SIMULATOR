@@ -42,6 +42,9 @@ struct Options {
   bool startSolver{false};
   double reynoldsNumber{0.0};
   long long solverMaxIterations{0};
+  std::string turbulenceModel;
+  std::string convectionScheme;
+  double firstLayerHeight{0.0};
   double angleOfAttackDeg{0.0};
   bool angleGiven{false};
   bool runPolarSweep{false};
@@ -72,6 +75,9 @@ void printUsage() {
       "      --reynolds N        Reynolds number based on the chord\n"
       "      --alpha DEG         Angle of attack in degrees\n"
       "      --max-iterations N  Outer-iteration ceiling for each solve\n"
+      "      --turbulence NAME   Closure: laminar (default) or sst\n"
+      "      --scheme NAME       Convection: upwind (default) or second\n"
+      "      --first-layer H     First cell height off the wall, in chords\n"
       "      --polar A:B:S       Sweep incidence from A to B in steps of S degrees,\n"
       "                          write the polar and exit (implies --flow)\n"
       "      --polar-csv FILE    Where the sweep writes its CSV\n"
@@ -126,6 +132,31 @@ cfd::Result<Options> parseArguments(std::span<const std::string_view> args) {
       if (!(options.reynoldsNumber > 0.0)) {
         return cfd::Error{cfd::ErrorCode::InvalidArgument,
                           "--reynolds must be a positive number"};
+      }
+    } else if (arg == "--turbulence") {
+      if (i + 1 >= args.size()) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          "--turbulence requires a name: laminar or sst"};
+      }
+      ++i;
+      options.turbulenceModel = std::string{args[i]};
+    } else if (arg == "--scheme") {
+      if (i + 1 >= args.size()) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          "--scheme requires a name: upwind or second"};
+      }
+      ++i;
+      options.convectionScheme = std::string{args[i]};
+    } else if (arg == "--first-layer") {
+      if (i + 1 >= args.size()) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          "--first-layer requires a height in chords"};
+      }
+      ++i;
+      options.firstLayerHeight = std::strtod(std::string{args[i]}.c_str(), nullptr);
+      if (!(options.firstLayerHeight > 0.0)) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          "--first-layer must be a positive fraction of chord"};
       }
     } else if (arg == "--max-iterations") {
       if (i + 1 >= args.size()) {
@@ -350,6 +381,9 @@ int main(int argc, char** argv) {
     appOptions.startSolver = options.startSolver;
     appOptions.reynoldsNumber = options.reynoldsNumber;
     appOptions.maxIterations = options.solverMaxIterations;
+    appOptions.turbulenceModel = options.turbulenceModel;
+    appOptions.convectionScheme = options.convectionScheme;
+    appOptions.firstLayerHeight = options.firstLayerHeight;
     appOptions.angleOfAttackDeg = options.angleOfAttackDeg;
     appOptions.angleGiven = options.angleGiven;
     appOptions.runPolarSweep = options.runPolarSweep;

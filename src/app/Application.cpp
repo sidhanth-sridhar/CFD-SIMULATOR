@@ -471,6 +471,32 @@ Status Application::initialize(const ApplicationOptions& options) {
     impl_->ui.flow.dirty = true;
   }
 
+  if (!options.turbulenceModel.empty()) {
+    std::string choice = options.turbulenceModel;
+    std::transform(choice.begin(), choice.end(), choice.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    impl_->ui.solving.turbulence = (choice == "sst" || choice == "komegasst" ||
+                                    choice == "k-omega-sst")
+                                       ? TurbulenceChoice::KOmegaSST
+                                       : TurbulenceChoice::Laminar;
+    impl_->ui.solving.dirty = true;
+  }
+
+  if (!options.convectionScheme.empty()) {
+    std::string choice = options.convectionScheme;
+    std::transform(choice.begin(), choice.end(), choice.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    impl_->ui.solving.settings.scheme = (choice == "second" || choice == "second-order")
+                                            ? solver::ConvectionScheme::SecondOrderUpwind
+                                            : solver::ConvectionScheme::Upwind;
+    impl_->ui.solving.dirty = true;
+  }
+
+  if (options.firstLayerHeight > 0.0) {
+    impl_->ui.meshing.firstLayerHeight = options.firstLayerHeight;
+    impl_->ui.meshing.dirty = true;
+  }
+
   if (options.maxIterations > 0) {
     impl_->ui.solving.maxIterations = options.maxIterations;
   }

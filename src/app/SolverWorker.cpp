@@ -192,9 +192,18 @@ void SolverWorker::runLoop() {
     }
 
     if (iteration % kProgressEvery == 0) {
-      CFD_LOG_INFO(kLogCategory, "iteration {}: continuity {:.3e}, momentum {:.3e} / {:.3e}",
-                   iteration, monitor.residuals.continuity, monitor.residuals.momentumX,
-                   monitor.residuals.momentumY);
+      if (solver_->turbulenceModel() != nullptr) {
+        CFD_LOG_INFO(kLogCategory,
+                     "iteration {}: continuity {:.3e}, momentum {:.3e} / {:.3e}, "
+                     "mu_t/mu up to {:.4g}, y+ up to {:.3g}",
+                     iteration, monitor.residuals.continuity, monitor.residuals.momentumX,
+                     monitor.residuals.momentumY, monitor.maxEddyViscosityRatio,
+                     solver_->turbulenceModel()->maxWallYPlus());
+      } else {
+        CFD_LOG_INFO(kLogCategory, "iteration {}: continuity {:.3e}, momentum {:.3e} / {:.3e}",
+                     iteration, monitor.residuals.continuity, monitor.residuals.momentumX,
+                     monitor.residuals.momentumY);
+      }
     }
 
     const bool finished = converged || hitLimit || diverged;
@@ -237,6 +246,11 @@ void SolverWorker::runLoop() {
         pending_.hitIterationLimit = hitLimit;
         pending_.diverged = diverged;
         pending_.running = running_.load();
+        pending_.maxEddyViscosityRatio = monitor.maxEddyViscosityRatio;
+        pending_.wallYPlus =
+            (solver_->turbulenceModel() != nullptr)
+                ? solver_->turbulenceModel()->maxWallYPlus()
+                : 0.0;
         hasPending_ = true;
       }
     }
