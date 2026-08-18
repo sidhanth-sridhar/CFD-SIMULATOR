@@ -27,6 +27,13 @@
 //
 //     tau_w = mu * d(u_t)/dn      at the wall
 //
+// The gradient is taken from a parabola fitted through three known points -
+// zero at the wall, and the wall-parallel speed in the first two cells out -
+// which is second-order accurate even on the strongly graded spacing a
+// boundary-layer mesh always has. A one-sided first difference from the first
+// cell alone is wrong in proportion to the first-layer height, and Cf, the
+// friction drag and the separation station all inherit that error.
+//
 // with u_t the velocity parallel to the surface and n the distance away from
 // it. Its *sign* is the interesting part. Measured along the surface in the
 // direction the flow is meant to travel - leading edge to trailing edge -

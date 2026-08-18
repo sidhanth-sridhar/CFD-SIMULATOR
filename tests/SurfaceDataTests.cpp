@@ -65,10 +65,6 @@ FlowField constantField(const Mesh& mesh, double pressure, Vec2 velocity,
   return field;
 }
 
-FlowField field_unused_placeholder(const Mesh& mesh) {
-  return constantField(mesh, 0.0, Vec2{1.0, 0.0});
-}
-
 SurfaceDistribution extract(const FlowField& field, const FreestreamConditions& conditions) {
   auto result = extractSurface(sharedMesh(), field, conditions, 1.0);
   EXPECT_TRUE(result) << (result.hasError() ? result.error().format() : "");
@@ -179,39 +175,108 @@ TEST(SurfaceData, WallShearVanishesWhenTheFluidIsAtRest) {
   EXPECT_FALSE(surface.hasSeparation());
 }
 
-// tau_w = mu * u_t / d, with u_t the wall-parallel speed in the first cell and
-// d the perpendicular distance to the wall. Checked directly against the mesh.
-TEST(SurfaceData, WallShearIsTheNearWallVelocityGradient) {
-  const Mesh& mesh = sharedMesh();
-  constexpr double kViscosity = 3.0;
-  const FlowField field = constantField(mesh, 0.0, Vec2{1.0, 0.0}, kViscosity);
-  const SurfaceDistribution surface = extract(field, stream());
-
-  // Take a station on the upper surface, away from the ends.
-  const SurfacePoint& point = surface.upper[surface.upper.size() / 2];
-
-  // Recover the owning cell by matching the face centre.
-  std::size_t owner = 0;
-  double best = 1e30;
+/// A field whose speed varies as a*d + b*d^2 with distance d from the wall,
+/// directed along the surface.
+///
+/// The wall gradient of that profile is exactly `a`, whatever `b` is - which is
+/// what makes it a real test of the wall-shear estimate rather than a
+/// restatement of the formula used to compute it. A one-sided first difference
+/// returns a + b*d1 and is wrong by b*d1; a parabola fitted through the wall
+/// and the first two cells returns a exactly.
+FlowField wallProfileField(const Mesh& mesh, double a, double b, double viscosity) {
+  struct WallFace {
+    Vec2 centre;
+    Vec2 normal;   // into the fluid
+    Vec2 tangent;  // along the surface
+  };
+  std::vector<WallFace> walls;
   for (std::size_t f = 0; f < mesh.faceCount(); ++f) {
     if (mesh.faces()[f].boundary != cfd::mesh::BoundaryType::Wall) {
       continue;
     }
-    const double gap = distance(mesh.faceCentres()[f], point.position);
-    if (gap < best) {
-      best = gap;
-      owner = static_cast<std::size_t>(mesh.faces()[f].owner);
+    const Vec2& p0 = mesh.nodes()[static_cast<std::size_t>(mesh.faces()[f].nodes[0])];
+    const Vec2& p1 = mesh.nodes()[static_cast<std::size_t>(mesh.faces()[f].nodes[1])];
+    const Vec2 along = p1 - p0;
+    const double len = length(along);
+    if (!(len > 0.0)) {
+      continue;
     }
+    walls.push_back({mesh.faceCentres()[f], mesh.faceNormals()[f] * -1.0, along * (1.0 / len)});
   }
-  ASSERT_LT(best, 1e-12);
+  EXPECT_FALSE(walls.empty());
 
-  const Vec2 offset = mesh.cellCentroids()[owner] - point.position;
-  const double wallDistance = std::abs(dot(offset, point.normal));
-  const Vec2 velocity{1.0, 0.0};
-  const Vec2 parallel = velocity - point.normal * dot(velocity, point.normal);
+  FlowField field;
+  field.resize(mesh.cellCount());
+  for (std::size_t c = 0; c < mesh.cellCount(); ++c) {
+    const Vec2& centroid = mesh.cellCentroids()[c];
 
-  const double expected = kViscosity * dot(parallel, point.tangent) / wallDistance;
-  EXPECT_NEAR(expected, point.wallShear, 1e-9 * std::abs(expected));
+    // Nearest wall face. Linear in the wall count, which is nothing here, and
+    // it means the profile is a function of wall distance on any mesh rather
+    // than relying on how the grid happens to be indexed.
+    std::size_t nearest = 0;
+    double best = 1e30;
+    for (std::size_t w = 0; w < walls.size(); ++w) {
+      const double gap = distance(centroid, walls[w].centre);
+      if (gap < best) {
+        best = gap;
+        nearest = w;
+      }
+    }
+
+    const WallFace& wall = walls[nearest];
+    const double d = std::abs(dot(centroid - wall.centre, wall.normal));
+    const double speed = a * d + b * d * d;
+
+    field.pressure[c] = 0.0;
+    field.velocity[c] = wall.tangent * speed;
+    field.density[c] = 2.0;
+    field.viscosity[c] = viscosity;
+  }
+  return field;
+}
+
+// A profile that is linear in wall distance has a gradient every scheme should
+// recover exactly, so this pins the plumbing: the normal direction, the
+// distance, the viscosity and the tangential projection.
+TEST(SurfaceData, WallShearIsExactForALinearProfile) {
+  constexpr double kViscosity = 3.0;
+  constexpr double kSlope = 7.0;
+  const FlowField field = wallProfileField(sharedMesh(), kSlope, 0.0, kViscosity);
+  const SurfaceDistribution surface = extract(field, stream());
+
+  // Away from the ends, where the surfaces meet and the tangent is ambiguous.
+  for (std::size_t i = surface.upper.size() / 4; i < 3 * surface.upper.size() / 4; ++i) {
+    const SurfacePoint& point = surface.upper[i];
+    EXPECT_NEAR(std::abs(point.wallShear), kViscosity * kSlope, 1e-6 * kViscosity * kSlope)
+        << "at x/c = " << point.chordFraction;
+  }
+}
+
+// The one that distinguishes the two schemes. With a strong quadratic term the
+// one-sided difference is wrong by b*d1, which at the first-layer height here
+// is of the same order as the answer itself; the parabola fit is exact.
+TEST(SurfaceData, WallShearIsSecondOrderAccurate) {
+  constexpr double kViscosity = 1.0;
+  constexpr double kSlope = 1.0;
+  constexpr double kCurvature = 1000.0;
+  const FlowField field = wallProfileField(sharedMesh(), kSlope, kCurvature, kViscosity);
+  const SurfaceDistribution surface = extract(field, stream());
+
+  for (std::size_t i = surface.upper.size() / 4; i < 3 * surface.upper.size() / 4; ++i) {
+    const SurfacePoint& point = surface.upper[i];
+    // 1% rather than round-off: the two cells either side of a station sit on a
+    // curved, graded grid, so "distance from the wall" is not perfectly the
+    // same coordinate for both. Being within 1% of the exact slope while a
+    // first difference would be tens of percent out is the claim.
+    EXPECT_NEAR(std::abs(point.wallShear), kViscosity * kSlope, 0.01 * kViscosity * kSlope)
+        << "at x/c = " << point.chordFraction;
+  }
+}
+
+TEST(SurfaceData, SkinFrictionIsWallShearOverDynamicPressure) {
+  const FlowField field = wallProfileField(sharedMesh(), 5.0, 0.0, 2.0);
+  const SurfaceDistribution surface = extract(field, stream());
+  const SurfacePoint& point = surface.upper[surface.upper.size() / 2];
   EXPECT_NEAR(point.wallShear / stream().dynamicPressure(), point.skinFriction, 1e-12);
 }
 
@@ -495,7 +560,7 @@ TEST(Streamlines, SkipSeedsOutsideTheDomain) {
   const Mesh& mesh = sharedMesh();
   cfd::post::StreamlineOptions options;
   options.seeds = {Vec2{1e5, 1e5}};
-  auto result = cfd::post::traceStreamlines(mesh, field_unused_placeholder(mesh), options);
+  auto result = cfd::post::traceStreamlines(mesh, constantField(mesh, 0.0, Vec2{1.0, 0.0}), options);
   ASSERT_TRUE(result);
   EXPECT_TRUE(result.value().empty());
 }

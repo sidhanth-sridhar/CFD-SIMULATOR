@@ -58,6 +58,45 @@ std::vector<WallFace> collectWallFaces(const mesh::Mesh& mesh) {
   return wall;
 }
 
+/// The cell one layer further from the wall than `wall.owner`, or -1.
+///
+/// Found by geometry rather than by mesh indices, so it does not depend on the
+/// grid being structured: of the owner's faces, the one whose outward normal
+/// points most nearly away from the wall is the one leading outwards, and the
+/// cell across it is the second layer.
+int secondCellFromWall(const mesh::Mesh& mesh, const WallFace& wall) {
+  int best = -1;
+  double bestAlignment = 0.5;  // must genuinely point outwards, not sideways
+
+  for (const int faceIndex : mesh.cellFaces()[wall.owner]) {
+    if (faceIndex < 0) {
+      continue;
+    }
+    const auto f = static_cast<std::size_t>(faceIndex);
+    if (f == wall.face) {
+      continue;
+    }
+
+    const int across = mesh::oppositeCell(mesh, f);
+    if (across < 0 || across == static_cast<int>(wall.owner)) {
+      continue;
+    }
+
+    // Face normals are stored outward from the owner; flip when this cell is
+    // the neighbour instead.
+    Vec2 outward = mesh.faceNormals()[f];
+    if (mesh.faces()[f].owner != static_cast<int>(wall.owner)) {
+      outward = outward * -1.0;
+    }
+    const double alignment = dot(outward, wall.normal);
+    if (alignment > bestAlignment) {
+      bestAlignment = alignment;
+      best = across;
+    }
+  }
+  return best;
+}
+
 /// Fill in everything measurable at one station.
 SurfacePoint evaluate(const mesh::Mesh& mesh, const flow::FlowField& field,
                       const WallFace& wall, Vec2 tangent, double dynamicPressure,
@@ -86,9 +125,43 @@ SurfacePoint evaluate(const mesh::Mesh& mesh, const flow::FlowField& field,
   point.nearWallSpeed = length(parallel);
 
   if (wallDistance > 0.0) {
-    // The wall itself is at zero velocity, so the gradient across the first
-    // cell is just the cell value over the distance.
-    const double gradient = dot(parallel, tangent) / wallDistance;
+    // The wall itself is at zero velocity, so the simplest estimate of the
+    // gradient is the first cell's value over its distance. That is only
+    // first-order accurate, and everything downstream - Cf, the friction drag,
+    // the separation station - inherits its error.
+    //
+    // With the second cell out as well, a parabola can be fitted through the
+    // three known points: zero at the wall, u1 at d1, u2 at d2. Its slope at
+    // the wall is second-order accurate even for unequal spacing, which is
+    // what a graded boundary-layer mesh always has:
+    //
+    //     du/dn|_0 = (u1 d2^2 - u2 d1^2) / (d1 d2 (d2 - d1))
+    //
+    // Setting u2 = 0 and d2 -> infinity recovers u1/d1, so the first-order
+    // formula is the same expression with the outer point discarded - which is
+    // exactly what happens at a wall face with no second cell behind it.
+    double gradient = dot(parallel, tangent) / wallDistance;
+
+    const int second = secondCellFromWall(mesh, wall);
+    if (second >= 0) {
+      const auto outer = static_cast<std::size_t>(second);
+      const Vec2 outerOffset = mesh.cellCentroids()[outer] - wall.centre;
+      const double outerDistance = std::abs(dot(outerOffset, wall.normal));
+
+      // Guard the denominator: coincident or inverted spacings would make the
+      // fit meaningless, and the first-order value is still perfectly usable.
+      if (outerDistance > wallDistance * 1.05) {
+        const Vec2& outerVelocity = field.velocity[outer];
+        const Vec2 outerParallel =
+            outerVelocity - wall.normal * dot(outerVelocity, wall.normal);
+        const double u1 = dot(parallel, tangent);
+        const double u2 = dot(outerParallel, tangent);
+        const double d1 = wallDistance;
+        const double d2 = outerDistance;
+        gradient = (u1 * d2 * d2 - u2 * d1 * d1) / (d1 * d2 * (d2 - d1));
+      }
+    }
+
     point.wallShear = field.viscosity[wall.owner] * gradient;
   }
   point.skinFriction =
