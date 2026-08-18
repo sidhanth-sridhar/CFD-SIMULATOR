@@ -379,14 +379,10 @@ struct PolarState {
   /// introduced if the flow ever had more than one steady state.
   bool continueBetweenPoints{true};
 
-  enum class Phase {
-    Idle,
-    /// Incidence set, waiting for the solver to pick the work up.
-    Starting,
-    /// Solver running on the current angle.
-    Solving,
-  };
-  Phase phase{Phase::Idle};
+  /// Where the sweep is between points. The phase and the decision made from
+  /// it both live in cfd_post, so the sequencing can be tested without a
+  /// window; this only holds the current value.
+  post::SweepPhase phase{post::SweepPhase::Idle};
 
   bool running{false};
   std::size_t index{0};

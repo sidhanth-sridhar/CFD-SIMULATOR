@@ -108,8 +108,34 @@ TEST(Polar, SweepRejectsANonPositiveStep) {
   EXPECT_FALSE(sweepAngles(0.0, 10.0, -1.0));
 }
 
-TEST(Polar, SweepRejectsAnEndBelowTheStart) {
-  EXPECT_FALSE(sweepAngles(10.0, 0.0, 1.0));
+// A descending sweep is the same sweep walked backwards. It exists so that
+// sweeping down can be compared with sweeping up, which is the only way to
+// detect hysteresis introduced by continuing each point from the last.
+TEST(Polar, SweepCanRunDownwards) {
+  const auto angles = sweepAngles(18.0, 0.0, 2.0);
+  ASSERT_TRUE(angles);
+  ASSERT_EQ(angles.value().size(), 10u);
+  EXPECT_DOUBLE_EQ(angles.value().front(), 18.0);
+  EXPECT_DOUBLE_EQ(angles.value().back(), 0.0);
+  for (std::size_t i = 1; i < angles.value().size(); ++i) {
+    EXPECT_LT(angles.value()[i], angles.value()[i - 1]);
+  }
+}
+
+// Up and down over the same range must visit exactly the same angles, or the
+// two sweeps would not be comparable and the hysteresis check would be
+// measuring the sweep rather than the flow.
+TEST(Polar, SweepingDownVisitsTheSameAnglesAsSweepingUp) {
+  const auto up = sweepAngles(0.0, 18.0, 2.0);
+  const auto down = sweepAngles(18.0, 0.0, 2.0);
+  ASSERT_TRUE(up);
+  ASSERT_TRUE(down);
+  ASSERT_EQ(up.value().size(), down.value().size());
+
+  const std::size_t n = up.value().size();
+  for (std::size_t i = 0; i < n; ++i) {
+    EXPECT_DOUBLE_EQ(up.value()[i], down.value()[n - 1 - i]);
+  }
 }
 
 // Every point is a full Navier-Stokes solve, so a mistyped step is minutes or
@@ -170,6 +196,90 @@ TEST(Polar, AnEmptyPolarHasNoBestPointAndIsNotConverged) {
   EXPECT_TRUE(polar.empty());
   EXPECT_EQ(polar.bestLiftToDragIndex(), -1);
   EXPECT_FALSE(polar.allConverged());
+}
+
+// ---------------------------------------------------------------------------
+// Sweep sequencing
+// ---------------------------------------------------------------------------
+
+using cfd::post::nextSweepAction;
+using cfd::post::SweepAction;
+using cfd::post::SweepObservation;
+using cfd::post::SweepPhase;
+
+constexpr int kBudget = 240;
+
+// The one that matters, and the bug this function exists to prevent. Right
+// after an angle is requested the solver has not started yet, which looks
+// identical to having finished. Recording here would attribute the *previous*
+// angle's forces to this one - a polar that is silently shifted by one point.
+TEST(Polar, ASweepDoesNotRecordBeforeTheSolverHasStarted) {
+  SweepObservation observation;
+  observation.solverRunning = false;
+  observation.framesWaiting = 0;
+
+  EXPECT_EQ(nextSweepAction(SweepPhase::Starting, observation, kBudget),
+            SweepAction::Wait);
+}
+
+TEST(Polar, ASweepStartsWatchingOnceTheSolverIsRunning) {
+  SweepObservation observation;
+  observation.solverRunning = true;
+
+  EXPECT_EQ(nextSweepAction(SweepPhase::Starting, observation, kBudget),
+            SweepAction::BeginSolving);
+}
+
+TEST(Polar, ASweepWaitsWhileTheSolverIsStillWorking) {
+  SweepObservation observation;
+  observation.solverRunning = true;
+
+  EXPECT_EQ(nextSweepAction(SweepPhase::Solving, observation, kBudget),
+            SweepAction::Wait);
+}
+
+TEST(Polar, ASweepRecordsWhenTheSolverStops) {
+  SweepObservation observation;
+  observation.solverRunning = false;
+
+  EXPECT_EQ(nextSweepAction(SweepPhase::Solving, observation, kBudget),
+            SweepAction::RecordPoint);
+}
+
+// Waiting forever looks exactly like working, which is the worst failure for an
+// operation that legitimately takes minutes.
+TEST(Polar, ASweepGivesUpIfTheSolverNeverStarts) {
+  SweepObservation observation;
+  observation.solverRunning = false;
+  observation.framesWaiting = kBudget;
+  EXPECT_EQ(nextSweepAction(SweepPhase::Starting, observation, kBudget),
+            SweepAction::Wait);
+
+  observation.framesWaiting = kBudget + 1;
+  EXPECT_EQ(nextSweepAction(SweepPhase::Starting, observation, kBudget),
+            SweepAction::AbortNotStarted);
+}
+
+// A solver that failed to build never reports itself as running, so the failure
+// has to be read before the timeout - otherwise a real error is reported as a
+// timeout 240 frames later.
+TEST(Polar, ASweepReportsASolverFailureImmediately) {
+  SweepObservation observation;
+  observation.solverRunning = false;
+  observation.solverFailed = true;
+  observation.framesWaiting = 0;
+
+  EXPECT_EQ(nextSweepAction(SweepPhase::Starting, observation, kBudget),
+            SweepAction::AbortFailed);
+}
+
+TEST(Polar, AnIdleSweepDoesNothing) {
+  SweepObservation observation;
+  observation.solverRunning = false;
+  EXPECT_EQ(nextSweepAction(SweepPhase::Idle, observation, kBudget), SweepAction::Wait);
+
+  observation.solverRunning = true;
+  EXPECT_EQ(nextSweepAction(SweepPhase::Idle, observation, kBudget), SweepAction::Wait);
 }
 
 // ---------------------------------------------------------------------------

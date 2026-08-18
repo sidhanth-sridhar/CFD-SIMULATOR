@@ -82,13 +82,77 @@ struct Polar {
 /// computed as start + i*step rather than accumulated, so a long sweep does not
 /// drift: 0 to 18 in steps of 0.1 must give exactly 18, not 17.999999999999.
 ///
-/// Fails on a non-positive step, on an end below the start, and on a range that
-/// would produce an unreasonable number of solves - each point here is a full
-/// Navier-Stokes solve, so a typo in the step is minutes or hours of work.
+/// `step` is a magnitude; the direction comes from which end is which, so
+/// 18 to 0 in steps of 2 walks downwards. That is not a convenience: continuing
+/// each point from the previous one is exactly how hysteresis would appear if
+/// the flow ever had more than one steady state at an incidence, and the way to
+/// look for it is to sweep down and compare with sweeping up.
+///
+/// Fails on a non-positive step, and on a range that would produce an
+/// unreasonable number of solves - each point here is a full Navier-Stokes
+/// solve, so a typo in the step is minutes or hours of work.
 [[nodiscard]] Result<std::vector<double>> sweepAngles(double start, double end, double step);
 
 /// Largest number of points a single sweep may ask for.
 inline constexpr std::size_t kMaxSweepPoints = 400;
+
+// ---------------------------------------------------------------------------
+// Sweep sequencing
+// ---------------------------------------------------------------------------
+//
+// A sweep cannot be a loop: every point is a full solve, so looping would
+// freeze the interface for the minutes it takes. It is therefore advanced one
+// frame at a time, and the question each frame is the same - given where the
+// sweep is and what the solver looks like, what happens next?
+//
+// That question is pure, and it is where the interesting mistake lives. The
+// obvious implementation asks "has the solver stopped?", which is
+// indistinguishable from "has the solver not started yet" - so the frame right
+// after a new angle is requested would record the *previous* angle's forces and
+// move straight on. Separating it out is what lets that be tested without a
+// window.
+
+/// Where a sweep is between points.
+enum class SweepPhase {
+  /// Not sweeping.
+  Idle,
+  /// An angle has been requested; waiting for the solver to pick it up.
+  Starting,
+  /// The solver is working on the current angle.
+  Solving,
+};
+
+/// What the solver looks like from the sweep's point of view this frame.
+struct SweepObservation {
+  bool solverRunning{false};
+  /// The solver reported it could not run at all.
+  bool solverFailed{false};
+  /// Frames spent so far waiting for the solver to start.
+  int framesWaiting{0};
+};
+
+/// What the sweep should do about it.
+enum class SweepAction {
+  /// Nothing this frame.
+  Wait,
+  /// The solver has taken the work up; start watching for it to finish.
+  BeginSolving,
+  /// This angle is finished; record the point and request the next.
+  RecordPoint,
+  /// The solver never started. Give up rather than wait forever.
+  AbortNotStarted,
+  /// The solver reported an error.
+  AbortFailed,
+};
+
+/// Decide what a sweep does next.
+///
+/// `startupFrameBudget` bounds how long `Starting` will wait. Some bound is
+/// needed because silently waiting forever is the worst possible failure for an
+/// operation that legitimately takes minutes: it looks exactly like working.
+[[nodiscard]] SweepAction nextSweepAction(SweepPhase phase,
+                                          const SweepObservation& observation,
+                                          int startupFrameBudget) noexcept;
 
 /// Render the polar as CSV text.
 ///

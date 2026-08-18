@@ -82,24 +82,6 @@ is exact and fades as incidence breaks it.
 
 ---
 
-### #2 — The sweep state machine has no automated test
-**Severity:** degraded · **Found:** Phase 7 · **Area:** app
-
-The polar sweep is a state machine advanced once per frame inside the
-application layer, so exercising it needs a window. The pure parts — which
-angles a sweep visits, the results table, CSV generation — have 17 tests; the
-sequencing does not.
-
-It has been run end to end repeatedly, and its failure modes are visible (the
-progress bar stops) rather than silent. That is not the same as a test.
-
-**Fix direction.** The decision itself is pure: given the current phase, whether
-the solver is running, and whether it reported an error, what should happen
-next? Extracting that into a free function would make the sequencing testable
-without a window, leaving only the plumbing untested.
-
----
-
 ### #3 — No grid-convergence study of the force coefficients
 **Severity:** degraded · **Found:** Phase 6 · **Area:** validation
 
@@ -114,21 +96,6 @@ demonstrated to be grid-independent.
 **Fix direction.** Run one incidence at coarse, medium and fine, and report how
 C<sub>l</sub> and C<sub>d</sub> move. Cheap to do and it either closes the gap
 or discovers something.
-
----
-
-### #4 — A descending sweep is refused, so hysteresis cannot be checked
-**Severity:** degraded · **Found:** Phase 7 · **Area:** post
-
-`sweepAngles` rejects an end below the start, so a sweep can only run upwards.
-Continuation between points is exactly the mechanism by which hysteresis would
-appear if the flow ever had more than one steady state at an incidence — and
-the way to detect that is to sweep down and compare with sweeping up.
-
-The switch to turn continuation off exists, but the comparison that would
-actually use it cannot be run.
-
-**Fix direction.** Allow `end < start` with a positive step and walk downwards.
 
 ---
 
@@ -259,6 +226,8 @@ Not defects. Listed so they are not mistaken for any.
 |---|---|---|---|
 | 48 | A sweep would have recorded the *previous* angle's forces and skipped straight on | "The solver has stopped" and "the solver has not started yet" are indistinguishable by the same test | A separate `Starting` phase that waits for the solver to actually be running before `Solving` is allowed to look for it stopping — with a frame budget, because silently waiting forever is the worst failure for something that takes minutes anyway |
 | 49 | A finished sweep silently started another solve | Restoring the pre-sweep incidence triggers the Phase 6 behaviour where a *converged* run picks itself back up when its freestream changes — right for a nudge of the slider, wrong here | Clear `converged` before restoring the angle. Found by reading my own code while the sweep ran |
+| 51 | A descending sweep was refused, so hysteresis could not be checked | `sweepAngles` rejected an end below the start. But continuation between points is exactly the mechanism by which hysteresis would appear if the flow had more than one steady state at an incidence, and the way to look for that is to sweep down and compare with up — which the code made impossible | `step` is now a magnitude and the direction comes from which end is which. Two tests: a descending sweep runs, and up and down over the same range visit exactly the same angles, so the comparison measures the flow rather than the sweep |
+| 52 | The sweep sequencing had no automated test | It was a state machine inside the application layer, so exercising it needed a window | Extracted the decision — given the phase, whether the solver is running, and whether it failed, what happens next — into `nextSweepAction` in `cfd_post`, which the sweep now calls. Seven tests, including the one for the bug it exists to prevent: in `Starting` with the solver not yet running the answer must be `Wait`, never `RecordPoint` |
 | 50 | `0:18:2` would have produced nine angles, not ten | `(18 − 0)/2` can evaluate a hair under 9, and truncating drops the last angle silently — 0 to 16 is a perfectly plausible-looking polar | Round rather than truncate when the remainder is within 10⁻⁹, and compute each angle as `start + i·step` rather than accumulating, so a 181-point sweep still lands exactly on 18 |
 
 ---

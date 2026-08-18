@@ -1364,6 +1364,11 @@ void updateSurface(UiState& ui) {
 
 namespace {
 
+/// Frames a sweep waits for the solver to take up a new angle before giving up.
+/// Generous: the request goes through a flow rebuild and a solver rebuild, and
+/// a couple of frames is normal. Anything approaching this means it never took.
+constexpr int kSweepStartupFrameBudget = 240;
+
 /// Rebuild the plot-ready copies from the recorded points.
 void refreshPolarSeries(PolarState& state) {
   state.alphaAxis.clear();
@@ -1395,7 +1400,7 @@ void requestAngle(UiState& ui, double angleDeg) {
   ui.solving.hitIterationLimit = false;
   ui.solving.errorMessage.clear();
 
-  ui.polar.phase = PolarState::Phase::Starting;
+  ui.polar.phase = post::SweepPhase::Starting;
   ui.polar.startupFrames = 0;
 }
 
@@ -1453,7 +1458,7 @@ void stopPolarSweep(UiState& ui, std::string_view reason) {
     return;
   }
   state.running = false;
-  state.phase = PolarState::Phase::Idle;
+  state.phase = post::SweepPhase::Idle;
   ui.solving.running = false;
   ui.solving.worker.setRunning(false);
 
@@ -1481,39 +1486,39 @@ void updatePolar(UiState& ui) {
     return;
   }
 
-  switch (state.phase) {
-    case PolarState::Phase::Idle:
+  // The sequencing decision itself lives in cfd_post, where it can be tested
+  // without a window. This function only carries it out.
+  post::SweepObservation observation;
+  observation.solverRunning = ui.solving.running;
+  observation.solverFailed = !ui.solving.errorMessage.empty();
+  observation.framesWaiting = state.startupFrames;
+
+  const post::SweepAction action =
+      post::nextSweepAction(state.phase, observation, kSweepStartupFrameBudget);
+
+  switch (action) {
+    case post::SweepAction::Wait:
+      if (state.phase == post::SweepPhase::Starting) {
+        ++state.startupFrames;
+      }
       return;
 
-    case PolarState::Phase::Starting: {
-      // The request goes through updateFlow and updateSolver, which take a
-      // frame or two to rebuild. Waiting for the solver to actually be running
-      // is what stops the sweep from mistaking "not started yet" for "done".
-      if (ui.solving.running) {
-        state.phase = PolarState::Phase::Solving;
-        return;
-      }
-      if (!ui.solving.errorMessage.empty()) {
-        state.errorMessage = ui.solving.errorMessage;
-        stopPolarSweep(ui, "stopped: the solver could not start");
-        return;
-      }
-      // A handful of frames is generous; anything longer means the request
-      // never took, and silently waiting forever would be the worst outcome.
-      constexpr int kMaxStartupFrames = 240;
-      if (++state.startupFrames > kMaxStartupFrames) {
-        state.errorMessage = "the solver did not start for this angle";
-        stopPolarSweep(ui, "stopped: the solver never started");
-      }
+    case post::SweepAction::BeginSolving:
+      state.phase = post::SweepPhase::Solving;
       return;
-    }
 
-    case PolarState::Phase::Solving:
+    case post::SweepAction::AbortFailed:
+      state.errorMessage = ui.solving.errorMessage;
+      stopPolarSweep(ui, "stopped: the solver could not start");
+      return;
+
+    case post::SweepAction::AbortNotStarted:
+      state.errorMessage = "the solver did not start for this angle";
+      stopPolarSweep(ui, "stopped: the solver never started");
+      return;
+
+    case post::SweepAction::RecordPoint:
       break;
-  }
-
-  if (ui.solving.running) {
-    return;  // still working on this angle
   }
 
   // The solve for this angle has stopped, one way or another. Record what it

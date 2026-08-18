@@ -40,14 +40,18 @@ Result<std::vector<double>> sweepAngles(double start, double end, double step) {
   if (!(step > 0.0)) {
     return Error{ErrorCode::InvalidArgument, "the sweep step must be positive"};
   }
-  if (end < start) {
-    return Error{ErrorCode::InvalidArgument,
-                 "the sweep end must not be below the start"};
-  }
+
+  // A descending sweep is the same sweep walked the other way. It matters
+  // because continuation between points is exactly the mechanism by which
+  // hysteresis would appear if the flow ever had more than one steady state at
+  // an incidence, and the way to look for that is to sweep down and compare
+  // with sweeping up. A step is always given as a positive magnitude; the
+  // direction comes from which end is which.
+  const double signedStep = (end < start) ? -step : step;
 
   // Round rather than truncate, so a step that divides the range exactly is not
   // lost to floating point: (18 - 0) / 2 can land a hair under 9.
-  const double span = (end - start) / step;
+  const double span = (end - start) / signedStep;
   const double rounded = std::round(span);
   const double count = (std::abs(span - rounded) < 1e-9) ? rounded : std::floor(span);
 
@@ -67,9 +71,38 @@ Result<std::vector<double>> sweepAngles(double start, double end, double step) {
   const auto total = static_cast<std::size_t>(points);
   for (std::size_t i = 0; i < total; ++i) {
     // Computed, not accumulated, so a long sweep does not drift.
-    angles.push_back(start + static_cast<double>(i) * step);
+    angles.push_back(start + static_cast<double>(i) * signedStep);
   }
   return angles;
+}
+
+SweepAction nextSweepAction(SweepPhase phase, const SweepObservation& observation,
+                            int startupFrameBudget) noexcept {
+  switch (phase) {
+    case SweepPhase::Idle:
+      return SweepAction::Wait;
+
+    case SweepPhase::Starting:
+      // Order matters: a solver that failed to build never reports itself as
+      // running, so the failure has to be read before the timeout.
+      if (observation.solverFailed) {
+        return SweepAction::AbortFailed;
+      }
+      if (observation.solverRunning) {
+        return SweepAction::BeginSolving;
+      }
+      if (observation.framesWaiting > startupFrameBudget) {
+        return SweepAction::AbortNotStarted;
+      }
+      // Crucially *not* RecordPoint. A solver that has not started yet looks
+      // exactly like one that has finished, and recording here would attribute
+      // the previous angle's forces to this one.
+      return SweepAction::Wait;
+
+    case SweepPhase::Solving:
+      return observation.solverRunning ? SweepAction::Wait : SweepAction::RecordPoint;
+  }
+  return SweepAction::Wait;
 }
 
 std::string toCsv(const Polar& polar) {
