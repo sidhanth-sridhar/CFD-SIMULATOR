@@ -405,9 +405,23 @@ The sweep above is checked in at
 [`examples/naca0012_re500_polar.csv`](examples/naca0012_re500_polar.csv).
 
 Separation columns are left empty where the surface stayed attached, rather than
-carrying a −1 that invites being plotted. `converged` and `iterations` travel
-with every row: a polar that silently mixes converged and unconverged points is
-worse than no polar.
+carrying a −1 that invites being plotted. `status` and `iterations` travel with
+every row: a polar that silently mixes converged and unconverged points is worse
+than no polar. `status` is `converged`, `iteration-limit` or `diverged` — a run
+that ran out of iterations ended somewhere near an answer and one that blew up
+did not, and collapsing both to "not converged" loses the distinction that
+decides whether the row is worth looking at.
+
+**Sweeping downwards.** `--polar 18:0:2` walks the range in reverse. That is not
+a convenience: continuing each point from the previous one is exactly how
+hysteresis would appear if the flow had more than one steady state at an
+incidence, and the only way to look for it is to sweep down and compare with
+sweeping up. Doing so on NACA 0012 at Re = 500 found none — the two directions
+agree to better than 0.6% at every angle, which is the convergence-tolerance
+scatter rather than a physical difference.
+
+It also found two real defects, which is the usual reward for running a check
+you expect to pass: see [`ISSUES.md`](ISSUES.md) #54 and #56.
 
 **A full sweep**, NACA 0012 at Re = 500 on the coarse C-grid, produced by
 `--polar 0:18:2` — ten points, about twelve minutes unattended:
