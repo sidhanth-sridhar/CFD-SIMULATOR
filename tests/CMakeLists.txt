@@ -39,11 +39,16 @@ target_link_libraries(cfd_tests
 target_compile_definitions(cfd_tests PRIVATE
     CFD_EXPECTED_VERSION="${PROJECT_VERSION}")
 
+# Most of these run in milliseconds, but the validation cases solve real flows
+# to convergence and take tens of seconds - the Blasius plate around ten on an
+# idle machine, more when the suite has been running long enough to warm it up.
+# The timeout is there to catch a hang, not to police runtime, so it is set well
+# clear of the slowest legitimate case rather than a small multiple of it.
 gtest_discover_tests(cfd_tests
     # Without this, a test binary that crashes on startup produces a confusing
     # "no tests found" instead of a failure.
     DISCOVERY_MODE PRE_TEST
-    PROPERTIES TIMEOUT 60)
+    PROPERTIES TIMEOUT 300)
 
 # The application binary is also expected to work; --self-check exercises
 # startup and shutdown without needing a display.

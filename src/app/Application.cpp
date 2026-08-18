@@ -46,6 +46,7 @@
 #include "Theme.hpp"
 #include "cfd/core/BuildInfo.hpp"
 #include "cfd/core/Log.hpp"
+#include "cfd/post/Polar.hpp"
 
 namespace cfd::app {
 namespace {
@@ -761,6 +762,29 @@ int Application::run() {
     }
 
     glfwSwapBuffers(impl_->window);
+  }
+
+  // The window can be closed from outside this program - by the user, by the
+  // window manager, or by the platform when something else takes over the
+  // display. If that happens mid-sweep, the points already solved are minutes
+  // or hours of work and there is no reason to throw them away silently.
+  if (impl_->ui.polar.running) {
+    const std::size_t recorded = impl_->ui.polar.polar.size();
+    const std::size_t planned = impl_->ui.polar.angles.size();
+    CFD_LOG_WARN(kLogCategory,
+                 "the window closed with a sweep in progress: {} of {} points solved",
+                 recorded, planned);
+    if (recorded > 0) {
+      const std::string path{impl_->ui.polar.csvPath.data()};
+      if (const Status written = post::writeCsv(impl_->ui.polar.polar, path); written) {
+        CFD_LOG_WARN(kLogCategory, "wrote the partial polar to {}", path);
+      } else {
+        CFD_LOG_ERROR(kLogCategory, "could not write the partial polar: {}",
+                      written.error().format());
+      }
+    }
+    // An interrupted sweep is not a successful run, whatever was salvaged.
+    exitCode = 1;
   }
 
   CFD_LOG_INFO(kLogCategory, "main loop finished");
