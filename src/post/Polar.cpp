@@ -107,7 +107,18 @@ SweepAction nextSweepAction(SweepPhase phase, const SweepObservation& observatio
       return SweepAction::Wait;
 
     case SweepPhase::Solving:
-      return observation.solverRunning ? SweepAction::Wait : SweepAction::RecordPoint;
+      if (observation.solverRunning) {
+        return SweepAction::Wait;
+      }
+      // A blow-up gets one retry from the undisturbed stream. Continuation is
+      // what makes a sweep affordable and it is also what lets one bad point
+      // poison the rest, because the diverged field becomes the next angle's
+      // initial guess. One retry, not repeated attempts: a second failure is a
+      // real result about that operating point.
+      if (observation.solverDiverged && !observation.alreadyRetried) {
+        return SweepAction::RetryCold;
+      }
+      return SweepAction::RecordPoint;
   }
   return SweepAction::Wait;
 }

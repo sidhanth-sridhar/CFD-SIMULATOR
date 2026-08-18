@@ -1111,6 +1111,7 @@ bool updateSolver(UiState& ui) {
     state.iteration = 0;
     state.converged = false;
     state.hitIterationLimit = false;
+    state.diverged = false;
     state.monitor = solver::SolverMonitor{};
     state.continuityHistory.clear();
     state.momentumHistory.clear();
@@ -1179,6 +1180,7 @@ bool updateSolver(UiState& ui) {
     state.iteration = update.iteration;
     state.converged = update.converged;
     state.hitIterationLimit = update.hitIterationLimit;
+    state.diverged = update.diverged;
 
     state.continuityHistory.insert(state.continuityHistory.end(),
                                    update.continuityHistory.begin(),
@@ -1418,6 +1420,7 @@ void requestAngle(UiState& ui, double angleDeg, bool cold = false) {
   ui.solving.running = true;
   ui.solving.converged = false;
   ui.solving.hitIterationLimit = false;
+  ui.solving.diverged = false;
   ui.solving.errorMessage.clear();
 
   ui.polar.phase = post::SweepPhase::Starting;
@@ -1475,6 +1478,11 @@ void startPolarSweep(UiState& ui) {
 void stopPolarSweep(UiState& ui, std::string_view reason) {
   PolarState& state = ui.polar;
   if (!state.running) {
+    // Worth saying even though there is nothing to do. A sweep that is already
+    // stopped when something tries to stop it means the run ended by a route
+    // nobody expected, and staying silent about that is how a premature exit
+    // becomes unexplainable after the fact.
+    CFD_LOG_DEBUG(kLogCategory, "polar sweep already stopped when asked to {}", reason);
     return;
   }
   state.running = false;
@@ -1510,7 +1518,13 @@ void updatePolar(UiState& ui) {
   // without a window. This function only carries it out.
   post::SweepObservation observation;
   observation.solverRunning = ui.solving.running;
-  observation.solverFailed = !ui.solving.errorMessage.empty();
+  // A diverged solve is reported through the solver's error message, so in the
+  // Starting phase that same message would look like "could not start". The
+  // sweep clears it when it requests an angle, so anything present here belongs
+  // to the solve that has just ended.
+  observation.solverFailed = !ui.solving.errorMessage.empty() && !ui.solving.diverged;
+  observation.solverDiverged = ui.solving.diverged;
+  observation.alreadyRetried = state.retryingCold;
   observation.framesWaiting = state.startupFrames;
 
   const post::SweepAction action =
@@ -1537,32 +1551,24 @@ void updatePolar(UiState& ui) {
       stopPolarSweep(ui, "stopped: the solver never started");
       return;
 
+    case post::SweepAction::RetryCold:
+      state.retryingCold = true;
+      CFD_LOG_WARN(kLogCategory,
+                   "polar point {} at alpha {:.2f} deg diverged while continuing; "
+                   "retrying from the undisturbed stream",
+                   state.polar.size() + 1, ui.flow.freestream.angleOfAttackDeg);
+      requestAngle(ui, state.angles[state.index], /*cold=*/true);
+      return;
+
     case post::SweepAction::RecordPoint:
       break;
   }
 
-  // The solve for this angle has stopped, one way or another.
-  //
-  // A blow-up gets one retry from the undisturbed stream first. Continuation is
-  // what makes a sweep affordable, but it is also what makes one bad point
-  // poison the rest: the diverged field would be carried into the next angle as
-  // its initial guess. Sweeping a NACA 0012 downwards through the onset of
-  // separation is a real case where this happens.
-  const bool diverged = !ui.solving.errorMessage.empty();
-  if (diverged && !state.retryingCold) {
-    state.retryingCold = true;
-    CFD_LOG_WARN(kLogCategory,
-                 "polar point {} at alpha {:.2f} deg diverged while continuing; "
-                 "retrying from the undisturbed stream",
-                 state.polar.size() + 1, ui.flow.freestream.angleOfAttackDeg);
-    requestAngle(ui, state.angles[state.index], /*cold=*/true);
-    return;
-  }
-
+  // The solve for this angle has stopped and is not going to be retried.
   post::PolarPoint point;
   point.angleOfAttackDeg = ui.flow.freestream.angleOfAttackDeg;
   point.converged = ui.solving.converged;
-  point.diverged = diverged;
+  point.diverged = ui.solving.diverged;
   point.retriedCold = state.retryingCold;
   point.iterations = ui.solving.iteration;
   point.continuityResidual = ui.solving.monitor.residuals.continuity;
@@ -2357,6 +2363,7 @@ void drawSolverPanel(UiState& ui) {
     if (wanted) {
       state.converged = false;
       state.hitIterationLimit = false;
+      state.diverged = false;
       state.errorMessage.clear();
     }
     state.worker.setRunning(wanted);

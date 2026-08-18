@@ -721,8 +721,20 @@ int Application::run() {
     // A sweep asked for on the command line is the whole job: once it has run,
     // there is nothing left for the window to do.
     if (impl_->sweepRequested && impl_->sweepStarted && !impl_->ui.polar.running) {
-      if (impl_->ui.polar.polar.empty() && !impl_->ui.polar.errorMessage.empty()) {
+      const std::size_t recorded = impl_->ui.polar.polar.size();
+      const std::size_t planned = impl_->ui.polar.angles.size();
+      if (recorded < planned || (recorded == 0 && !impl_->ui.polar.errorMessage.empty())) {
+        // Closing on an incomplete sweep is a defect somewhere, not a normal
+        // ending. Say so and fail the process, rather than exiting 0 with a
+        // short CSV that looks like a deliberate result.
+        CFD_LOG_ERROR(kLogCategory,
+                      "closing with the sweep incomplete: {} of {} points recorded{}{}",
+                      recorded, planned,
+                      impl_->ui.polar.errorMessage.empty() ? "" : " - ",
+                      impl_->ui.polar.errorMessage);
         exitCode = 1;
+      } else {
+        CFD_LOG_INFO(kLogCategory, "sweep complete ({} points); closing", recorded);
       }
       glfwSetWindowShouldClose(impl_->window, GLFW_TRUE);
     }

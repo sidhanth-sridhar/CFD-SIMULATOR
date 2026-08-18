@@ -246,6 +246,41 @@ TEST(Polar, ASweepRecordsWhenTheSolverStops) {
             SweepAction::RecordPoint);
 }
 
+// Continuation is what makes a sweep affordable and also what lets one bad
+// point poison the rest: the diverged field becomes the next angle's initial
+// guess. So a blow-up is retried from the undisturbed stream first.
+TEST(Polar, ADivergedPointIsRetriedFromTheUndisturbedStream) {
+  SweepObservation observation;
+  observation.solverRunning = false;
+  observation.solverDiverged = true;
+  observation.alreadyRetried = false;
+
+  EXPECT_EQ(nextSweepAction(SweepPhase::Solving, observation, kBudget),
+            SweepAction::RetryCold);
+}
+
+// One retry, not repeated attempts. A second failure is a real result about
+// that operating point and belongs in the table, marked as what it is.
+TEST(Polar, ADivergedPointIsRetriedOnlyOnce) {
+  SweepObservation observation;
+  observation.solverRunning = false;
+  observation.solverDiverged = true;
+  observation.alreadyRetried = true;
+
+  EXPECT_EQ(nextSweepAction(SweepPhase::Solving, observation, kBudget),
+            SweepAction::RecordPoint);
+}
+
+// A retry that is still running must not be mistaken for one that has finished.
+TEST(Polar, ARetryInProgressIsLeftAlone) {
+  SweepObservation observation;
+  observation.solverRunning = true;
+  observation.solverDiverged = false;
+  observation.alreadyRetried = true;
+
+  EXPECT_EQ(nextSweepAction(SweepPhase::Solving, observation, kBudget), SweepAction::Wait);
+}
+
 // Waiting forever looks exactly like working, which is the worst failure for an
 // operation that legitimately takes minutes.
 TEST(Polar, ASweepGivesUpIfTheSolverNeverStarts) {

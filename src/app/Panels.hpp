@@ -281,6 +281,10 @@ struct SolverState {
   long long maxIterations{5000};
   bool converged{false};
   bool hitIterationLimit{false};
+  /// The last run blew up. Distinct from `errorMessage` being non-empty, which
+  /// also covers a solver that could not be built at all - and those need
+  /// different responses, so they are tracked separately.
+  bool diverged{false};
 
   long long iteration{0};
   solver::SolverMonitor monitor;

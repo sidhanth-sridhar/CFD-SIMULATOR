@@ -142,6 +142,10 @@ struct SweepObservation {
   bool solverFailed{false};
   /// Frames spent so far waiting for the solver to start.
   int framesWaiting{0};
+  /// The solve for this angle blew up rather than finishing.
+  bool solverDiverged{false};
+  /// This angle has already been retried from the undisturbed stream once.
+  bool alreadyRetried{false};
 };
 
 /// What the sweep should do about it.
@@ -152,6 +156,9 @@ enum class SweepAction {
   BeginSolving,
   /// This angle is finished; record the point and request the next.
   RecordPoint,
+  /// The solve blew up. Try this same angle again from the undisturbed
+  /// stream before accepting the failure.
+  RetryCold,
   /// The solver never started. Give up rather than wait forever.
   AbortNotStarted,
   /// The solver reported an error.
