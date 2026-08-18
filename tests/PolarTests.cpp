@@ -340,18 +340,51 @@ TEST(Polar, CsvCarriesTheConditionsAndTheValues) {
   EXPECT_NE(csv.find("6.000000,0.42500000"), std::string::npos);
 }
 
-TEST(Polar, CsvMarksUnconvergedPoints) {
+// Running out of iterations and blowing up are both "not converged" and are not
+// the same failure: one ended somewhere near an answer and the other did not.
+// The file has to say which.
+TEST(Polar, CsvDistinguishesRunningOutOfIterationsFromDiverging) {
   Polar polar = samplePolar();
+  polar.points[1].converged = false;  // hit the limit
   polar.points[2].converged = false;
+  polar.points[2].diverged = true;
 
-  const std::vector<std::string> lines = splitLines(toCsv(polar));
-  std::size_t marked = 0;
+  const std::string csv = toCsv(polar);
+  const std::vector<std::string> lines = splitLines(csv);
+
+  std::size_t converged = 0;
+  std::size_t limited = 0;
+  std::size_t diverged = 0;
   for (const std::string& line : lines) {
-    if (!line.empty() && line.front() != '#' && line.find(",no,") != std::string::npos) {
-      ++marked;
+    if (line.empty() || line.front() == '#') {
+      continue;
+    }
+    if (line.find(",converged,") != std::string::npos) {
+      ++converged;
+    }
+    if (line.find(",iteration-limit,") != std::string::npos) {
+      ++limited;
+    }
+    if (line.find(",diverged,") != std::string::npos) {
+      ++diverged;
     }
   }
-  EXPECT_EQ(marked, 1u);
+  EXPECT_EQ(converged, 2u);
+  EXPECT_EQ(limited, 1u);
+  EXPECT_EQ(diverged, 1u);
+}
+
+TEST(Polar, PointStatusNamesTheOutcome) {
+  PolarPoint point;
+  point.converged = true;
+  EXPECT_EQ(cfd::post::pointStatus(point), "converged");
+
+  point.converged = false;
+  EXPECT_EQ(cfd::post::pointStatus(point), "iteration-limit");
+
+  // Divergence wins: a run that blew up did not merely run out of iterations.
+  point.diverged = true;
+  EXPECT_EQ(cfd::post::pointStatus(point), "diverged");
 }
 
 TEST(Polar, WritesAndReadsBackTheSameText) {

@@ -393,6 +393,11 @@ struct PolarState {
   /// begins cannot wedge the sweep silently.
   int startupFrames{0};
 
+  /// The current angle is being retried from the undisturbed stream after its
+  /// continued solve diverged. One retry per point: a second failure is a real
+  /// result about that operating point, not something to keep hammering at.
+  bool retryingCold{false};
+
   std::array<char, 256> csvPath{"polar.csv"};
   std::string statusMessage;
   std::string errorMessage;

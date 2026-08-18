@@ -76,6 +76,13 @@ Result<std::vector<double>> sweepAngles(double start, double end, double step) {
   return angles;
 }
 
+std::string_view pointStatus(const PolarPoint& point) noexcept {
+  if (point.diverged) {
+    return "diverged";
+  }
+  return point.converged ? "converged" : "iteration-limit";
+}
+
 SweepAction nextSweepAction(SweepPhase phase, const SweepObservation& observation,
                             int startupFrameBudget) noexcept {
   switch (phase) {
@@ -120,10 +127,11 @@ std::string toCsv(const Polar& polar) {
   out += std::format("# continued_between_points,{}\n",
                      polar.continuedBetweenPoints ? "yes" : "no");
   out += "# every row is a separate Navier-Stokes solve; nothing is interpolated\n";
+  out += "# status is converged, iteration-limit or diverged\n";
 
   out +=
       "alpha_deg,cl,cd,cd_pressure,cd_friction,cm,l_over_d,"
-      "separation_upper_xc,separation_lower_xc,converged,iterations,continuity_residual\n";
+      "separation_upper_xc,separation_lower_xc,status,iterations,continuity_residual\n";
 
   for (const PolarPoint& p : polar.points) {
     // Separation is written as an empty field where the surface stayed
@@ -136,8 +144,8 @@ std::string toCsv(const Polar& polar) {
     out += std::format("{:.6f},{:.8f},{:.8f},{:.8f},{:.8f},{:.8f},{:.6f},{},{},{},{},{:.6e}\n",
                        p.angleOfAttackDeg, p.liftCoefficient, p.dragCoefficient,
                        p.pressureDragCoefficient, p.frictionDragCoefficient,
-                       p.momentCoefficient, p.liftToDrag, upper, lower,
-                       p.converged ? "yes" : "no", p.iterations, p.continuityResidual);
+                       p.momentCoefficient, p.liftToDrag, upper, lower, pointStatus(p),
+                       p.iterations, p.continuityResidual);
   }
   return out;
 }

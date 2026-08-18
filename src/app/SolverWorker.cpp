@@ -170,6 +170,15 @@ void SolverWorker::runLoop() {
         !std::isfinite(monitor.residuals.momentumX) ||
         !std::isfinite(monitor.residuals.momentumY)) {
       diverged = true;
+      // The only outcome that used to be silent, which is exactly backwards:
+      // convergence and the iteration limit both announced themselves while a
+      // blow-up did not, so a run that had destroyed its own field looked from
+      // the log like one that had simply stopped.
+      CFD_LOG_WARN(kLogCategory,
+                   "diverged at iteration {}: continuity {:.3e}, momentum {:.3e} / {:.3e} "
+                   "- the field is not a solution",
+                   iteration, monitor.residuals.continuity, monitor.residuals.momentumX,
+                   monitor.residuals.momentumY);
     } else if (monitor.residuals.worst() < tolerance) {
       converged = true;
       CFD_LOG_INFO(kLogCategory, "converged after {} iterations, continuity {:.3e}",

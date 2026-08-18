@@ -21,6 +21,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "cfd/core/Error.hpp"
@@ -46,9 +47,21 @@ struct PolarPoint {
   /// A polar that silently mixes converged and unconverged points is worse than
   /// no polar, so this travels with every row and into the CSV.
   bool converged{false};
+  /// The solve blew up rather than merely running out of iterations. Recorded
+  /// separately because the two are not the same failure: a run that hit its
+  /// limit is somewhere near an answer, and one that diverged is not near
+  /// anything. Both are "not converged", and reporting only that would lose the
+  /// distinction that decides whether the row is worth looking at at all.
+  bool diverged{false};
+  /// Whether the point had to be retried from the undisturbed stream after
+  /// continuing from the previous angle failed.
+  bool retriedCold{false};
   long long iterations{0};
   double continuityResidual{0.0};
 };
+
+/// How a point's solve ended, as written to the CSV.
+[[nodiscard]] std::string_view pointStatus(const PolarPoint& point) noexcept;
 
 /// A whole sweep, plus enough of the conditions to make it meaningful later.
 ///

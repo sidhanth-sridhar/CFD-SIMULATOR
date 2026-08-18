@@ -1387,11 +1387,16 @@ void refreshPolarSeries(PolarState& state) {
 }
 
 /// Point the session at one incidence and ask the solver for it.
-void requestAngle(UiState& ui, double angleDeg) {
+///
+/// `cold` forces a start from the undisturbed stream even when the sweep is
+/// otherwise continuing between points. Used to retry an angle whose continued
+/// solve blew up: a diverged field is the worst possible initial guess, and
+/// carrying it into the next attempt only spreads the damage.
+void requestAngle(UiState& ui, double angleDeg, bool cold = false) {
   ui.flow.freestream.angleOfAttackDeg = angleDeg;
   // Continuation is what makes a sweep take minutes rather than an hour: a
   // degree of incidence is a small perturbation on a converged field.
-  ui.flow.warmStart = ui.polar.continueBetweenPoints;
+  ui.flow.warmStart = ui.polar.continueBetweenPoints && !cold;
   ui.flow.dirty = true;
   // updateFlow rebuilds the solver, and the rebuild carries this request
   // through as "keep going once rebuilt".
@@ -1521,11 +1526,29 @@ void updatePolar(UiState& ui) {
       break;
   }
 
-  // The solve for this angle has stopped, one way or another. Record what it
-  // reached, including whether it got there.
+  // The solve for this angle has stopped, one way or another.
+  //
+  // A blow-up gets one retry from the undisturbed stream first. Continuation is
+  // what makes a sweep affordable, but it is also what makes one bad point
+  // poison the rest: the diverged field would be carried into the next angle as
+  // its initial guess. Sweeping a NACA 0012 downwards through the onset of
+  // separation is a real case where this happens.
+  const bool diverged = !ui.solving.errorMessage.empty();
+  if (diverged && !state.retryingCold) {
+    state.retryingCold = true;
+    CFD_LOG_WARN(kLogCategory,
+                 "polar point {} at alpha {:.2f} deg diverged while continuing; "
+                 "retrying from the undisturbed stream",
+                 state.polar.size() + 1, ui.flow.freestream.angleOfAttackDeg);
+    requestAngle(ui, state.angles[state.index], /*cold=*/true);
+    return;
+  }
+
   post::PolarPoint point;
   point.angleOfAttackDeg = ui.flow.freestream.angleOfAttackDeg;
   point.converged = ui.solving.converged;
+  point.diverged = diverged;
+  point.retriedCold = state.retryingCold;
   point.iterations = ui.solving.iteration;
   point.continuityResidual = ui.solving.monitor.residuals.continuity;
 
@@ -1554,8 +1577,13 @@ void updatePolar(UiState& ui) {
                "Cm {:+.5f}, L/D {:.3f}{}",
                state.polar.size(), state.angles.size(), point.angleOfAttackDeg,
                point.liftCoefficient, point.dragCoefficient, point.momentCoefficient,
-               point.liftToDrag, point.converged ? "" : " (NOT CONVERGED)");
+               point.liftToDrag,
+               point.converged ? "" : std::format(" ({})", post::pointStatus(point)));
 
+  // A point that had to be retried cold leaves a field that is a fine starting
+  // guess for the next angle, so continuation resumes normally from here.
+  const bool wasRetry = state.retryingCold;
+  state.retryingCold = false;
   ++state.index;
   if (state.index >= state.angles.size()) {
     // Write the file before announcing success, so "saved" always means saved.
@@ -1576,7 +1604,9 @@ void updatePolar(UiState& ui) {
 
   state.statusMessage =
       std::format("solving {} of {}", state.index + 1, state.angles.size());
-  requestAngle(ui, state.angles[state.index]);
+  // If even the cold retry diverged, the field left behind is garbage; the next
+  // angle starts clean rather than inheriting it.
+  requestAngle(ui, state.angles[state.index], /*cold=*/wasRetry && point.diverged);
 }
 
 void fitDomain(UiState& ui) {
