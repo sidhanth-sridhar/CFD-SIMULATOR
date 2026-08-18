@@ -173,6 +173,43 @@ TEST(EvaluateFaces, OutletFacesCarryTheReferencePressure) {
   EXPECT_GT(outletFaces, 0u);
 }
 
+// A boundary the stream runs parallel to must not be treated as an outlet.
+//
+// At exactly zero incidence the top and bottom of a C-grid have normals of
+// (0, +/-1) and the stream is (U, 0), so u.n is exactly zero along all of them.
+// Classifying by the bare sign puts every one of those faces on the outflow
+// side, where a pressure is imposed and the velocity left free - turning a
+// boundary the flow merely slides past into a surface mass can breathe through.
+// In the solver, where the same decision is remade every iteration from the
+// current flux, that made the boundary condition flip back and forth and the
+// continuity residual never converged. Far from the body the flow *is* the
+// freestream, so a tangential face takes it.
+TEST(EvaluateFaces, ABoundaryTheStreamIsParallelToTakesTheFreestream) {
+  const Mesh& mesh = sharedMesh();
+  FreestreamConditions stream = defaultStream();
+  stream.angleOfAttackDeg = 0.0;
+
+  const FaceState faces = applied(BoundaryConditions{}, stream);
+
+  std::size_t tangential = 0;
+  for (std::size_t f = 0; f < mesh.faceCount(); ++f) {
+    if (mesh.faces()[f].boundary != BoundaryType::Farfield) {
+      continue;
+    }
+    const double outward = dot(stream.velocity(), mesh.faceNormals()[f]);
+    if (std::abs(outward) > 1e-6 * stream.speed) {
+      continue;
+    }
+    ++tangential;
+    EXPECT_NE(0, faces.inflow[f])
+        << "face " << f << " is tangential (u.n = " << outward << ") but is an outlet";
+    EXPECT_NEAR(stream.velocity().x, faces.velocity[f].x, 1e-12);
+    EXPECT_NEAR(stream.velocity().y, faces.velocity[f].y, 1e-12);
+  }
+  // The case only means anything if such faces exist on this mesh.
+  EXPECT_GT(tangential, 0u);
+}
+
 // An external-flow outer boundary is not all inflow: the stream enters at the
 // front and leaves at the back, and which is which follows the sign of u.n.
 TEST(EvaluateFaces, FarFieldSplitsIntoInflowAndOutflow) {
@@ -189,7 +226,10 @@ TEST(EvaluateFaces, FarFieldSplitsIntoInflowAndOutflow) {
     const double outward = dot(stream.velocity(), mesh.faceNormals()[f]);
     if (faces.inflow[f] != 0) {
       ++entering;
-      EXPECT_LT(outward, 0.0) << "face " << f << " marked inflow but u.n >= 0";
+      // Inflow covers "entering" and "running parallel to"; only fluid that is
+      // unambiguously leaving gets a pressure condition.
+      EXPECT_LT(outward, 1e-3 * stream.speed)
+          << "face " << f << " marked inflow but the stream is clearly leaving";
       // Inflow faces have the stream imposed on them.
       EXPECT_NEAR(stream.velocity().x, faces.velocity[f].x, 1e-12);
     } else {
