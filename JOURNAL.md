@@ -3497,3 +3497,164 @@ that the implementation was right.
 **Next:** a convection scheme that converges at second order, on explicit
 instruction. It is the largest single source of error left, and every result in
 this phase is limited by it.
+
+---
+
+# Phase 9 — Auditing k-omega SST
+
+**Completed:** 2026-08-18
+**Outcome:** 267/267 tests pass. One real term-level bug found by audit, the
+exact equations and every simplification documented, and the model verified
+against the one case where it has a closed-form answer.
+
+## 1. Scope, and why this phase is an audit
+
+k-omega SST was implemented in Phase 8, because that phase's brief asked for it
+as the first concrete model behind the `TurbulenceModel` interface. Rebuilding
+it would have been theatre. What Phase 9 actually asks for that Phase 8 did not
+deliver is sharper:
+
+- *"Do not simplify the model without explicitly documenting the
+  simplification."* - which requires going through the implementation term by
+  term against the published model and writing down every departure.
+- *"Document the exact equations implemented"* - not the equations of the paper,
+  the ones in the code.
+- *"Test the turbulence model independently where possible."*
+- *"Monitor k, omega, nu_t."*
+
+So this phase is an audit, a fix, a verification and a piece of documentation.
+
+## 2. What the audit found
+
+Going through the terms one at a time, comparing the code against Menter (2003),
+turned up one genuine error.
+
+**Cross-diffusion was clipped positive in the source term.** The quantity
+
+$$CD_{k\\omega} = 2\\rho\\sigma_{\\omega 2}\\frac{1}{\\omega}\\nabla k \\cdot \\nabla\\omega$$
+
+appears twice in the model and needs two different forms:
+
+- In the omega equation it is a **source**, entering as
+  $2(1-F_1)\\rho\\sigma_{\\omega2}(1/\\omega)\\nabla k\\cdot\\nabla\\omega$. Its
+  sign is physical: where the gradients oppose, it is a genuine sink.
+- In $F_1$'s argument it is a **denominator**,
+  $4\\rho\\sigma_{\\omega2}k/(CD_{k\\omega}d^2)$, and must be floored - Menter
+  specifies $\\max(CD_{k\\omega}, 10^{-10})$.
+
+The code computed the floored version once and used it for both. That deletes
+every negative cross-diffusion contribution in the domain, and in the outer part
+of a boundary layer - where $\\nabla k$ and $\\nabla\\omega$ point opposite ways -
+most of them are negative.
+
+No test failed. Nothing diverged. The coefficients moved by under a percent when
+it was fixed. It was found by reading the implementation against the paper, which
+is the only thing that would have found it.
+
+The remaining terms checked out: production $P_k = \\mu_t S^2$ (the
+$-\\tfrac{2}{3}\\rho k\\,\\mathrm{div}\\,\\mathbf{U}$ part of the Boussinesq stress
+vanishing for constant density), the limiter
+$\\tilde P_k = \\min(P_k, 10\\beta^*\\rho k\\omega)$, both destruction terms, the
+blended diffusion coefficients, $F_2$'s argument, the eddy-viscosity limiter, and
+the constants including $\\gamma_i$.
+
+## 3. The verification: decaying turbulence
+
+Two-equation models are usually judged by whether they reproduce flows, which
+tests the model and the discretisation and the boundary conditions all at once.
+There is one case where that can be separated out.
+
+Put uniform turbulence in a uniform stream with no walls and no shear. There is
+no production ($S=0$), no wall damping ($F_1=0$, so the k-epsilon constants
+apply), and no transverse gradient. The transport equations collapse to two
+ordinary differential equations in $x/U$:
+
+$$\\rho U \\frac{dk}{dx} = -\\beta^*\\rho k \\omega, \\qquad
+\\rho U \\frac{d\\omega}{dx} = -\\beta\\rho\\omega^2$$
+
+The second integrates alone, and substituting it into the first gives a **power
+law** rather than an exponential - the decay slows as the eddies grow:
+
+$$\\omega(x) = \\frac{\\omega_0}{1 + \\beta\\omega_0 x/U}, \\qquad
+k(x) = k_0\\left(1 + \\frac{\\beta\\omega_0 x}{U}\\right)^{-\\beta^*/\\beta}$$
+
+With the k-epsilon constants the exponent is $-0.09/0.0828 = -1.087$.
+
+Measured over a decade of decay on 200 cells: **1.5% in omega, 1.7% in k**. The
+residue is discretisation - first-order upwind in x, plus a streamwise diffusion
+term the analytic solution has no counterpart for - and both shrink with the
+mesh. This tests destruction in both equations and the balance between them
+against something that is not itself.
+
+## 4. Simplifications, stated
+
+Written into `KOmegaSST.hpp` beside the equations, because a simplification
+recorded only in a commit message is a simplification nobody will find:
+
+1. **The $-\\tfrac{2}{3}\\rho k \\mathbf{I}$ part of the Boussinesq stress is not
+   added to the momentum equation.** It is isotropic, so at constant density it
+   is the gradient of a scalar and folds into the pressure. What the solver
+   calls pressure is therefore $p + \\tfrac{2}{3}\\rho k$, and Cp inherits that -
+   under a per cent of dynamic pressure at these turbulence levels, but a
+   modelling choice rather than an identity.
+2. **The omega production is unlimited** while the k production is limited.
+   Substituting $P_k=\\mu_t S^2$ into $(\\gamma/\\nu_t)P_k$ gives $\\gamma\\rho S^2$
+   identically, so the term itself is exact; the question is only whether the
+   limiter also applies. Menter states it for k, and this follows that.
+3. **k and omega are convected first-order upwind**, where momentum offers
+   second order. Deliberate: for strictly positive quantities boundedness beats
+   accuracy, and an overshoot that drives k negative is not a small error.
+4. **No transition model** - turbulent from the leading edge, which
+   over-predicts drag, most at low incidence.
+5. **No compressibility, buoyancy, or rotation/curvature corrections** - none
+   apply to steady incompressible flow over a fixed section.
+
+## 5. Numerical treatment
+
+- **Positivity of k**: destruction $\\beta^*\\rho\\omega k$ is written as
+  $(\\beta^*\\rho\\omega)\\cdot k$ so it lands on the diagonal - a larger k makes
+  its own sink larger. Production is explicit and positive. Floored at zero
+  after each solve.
+- **Positivity of omega**: the same split for $\\beta\\rho\\omega^2$. Floored at
+  $10^{-10}$, because omega appears in denominators throughout and a quantity
+  that is only *physically* positive will go negative somewhere on a real mesh
+  during an iteration. That is not a fudge; it is what keeps a positive quantity
+  positive under a discretisation that does not guarantee it.
+- **Stiff sources**: the implicit destruction above is what makes them tractable.
+  Explicit treatment needs an impractically small relaxation.
+- **Near-wall**: no wall function; integrated to the wall, needing y+ of order 1,
+  and the achieved y+ is reported.
+
+## 6. Monitoring
+
+k, omega and mu_t ranges now travel out through `SolverMonitor` into the
+periodic log line and the Solve panel. On NACA 0012 at Re = 10^6 they read
+
+    k 5.5e-07 .. 2.87e+01,  omega 1.4e+01 .. 2.6e+07,  mu_t/mu up to 147,  y+ 1.24
+
+The six decades of omega between freestream and wall are the model working as
+intended. The panel additionally warns when k has been driven to its floor
+anywhere, because that means positivity is being held by clipping rather than by
+the discretisation - a thing worth seeing rather than inferring.
+
+## 7. What I learned
+
+- **An audit finds what tests do not.** The cross-diffusion clip broke no test,
+  diverged nothing, and moved the answer by under a percent. The only thing that
+  would ever have found it is reading the code against the paper, term by term,
+  which is exactly what this phase asked for and exactly the kind of task that is
+  tempting to treat as a formality.
+
+- **A closed-form case is worth more than a plausible flow.** Decaying
+  homogeneous turbulence is the only configuration where these equations have an
+  exact answer, and it isolates the source terms from the discretisation, the
+  wall treatment and the boundary conditions all at once. Two per cent against an
+  analytic solution says more than a lift coefficient near a handbook value.
+
+- **Documenting a simplification is a design act, not a clerical one.** Writing
+  out "the -2/3 rho k term is absorbed into pressure" forced the observation that
+  the reported Cp is therefore not quite the pressure coefficient - which nothing
+  in the code had ever said.
+
+**Next:** a convection scheme that converges at second order, on explicit
+instruction. It remains the largest source of error in every result here.

@@ -112,6 +112,20 @@ struct TurbulenceContext {
   double relaxation{0.7};
 };
 
+/// What a model's own variables are doing, for monitoring.
+///
+/// Reported rather than inferred: "is the model working" is answered by these
+/// three ranges, and without them a closure that has quietly stalled at its
+/// freestream values looks identical to one that is doing its job.
+struct TurbulenceRanges {
+  double minEnergy{0.0};
+  double maxEnergy{0.0};
+  double minDissipation{0.0};
+  double maxDissipation{0.0};
+  double minEddyViscosity{0.0};
+  double maxEddyViscosity{0.0};
+};
+
 /// How far a model's own equations are from being satisfied.
 struct TurbulenceResiduals {
   double first{0.0};   ///< normalised residual of the model's first equation
@@ -154,6 +168,10 @@ class TurbulenceModel {
   [[nodiscard]] virtual const std::vector<double>& eddyViscosity() const noexcept = 0;
 
   [[nodiscard]] virtual TurbulenceResiduals residuals() const noexcept = 0;
+
+  /// Ranges of the model's own variables. Default is all zeros, which is the
+  /// truthful answer for a closure that has none.
+  [[nodiscard]] virtual TurbulenceRanges ranges() const noexcept { return {}; }
 
   /// Largest y+ over the wall faces, or 0 if the model does not track it.
   ///

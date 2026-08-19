@@ -177,6 +177,7 @@ Status KOmegaSST::initialise(const mesh::Mesh& mesh, const flow::FaceConditions&
   f1_.assign(cells, 0.0);
   f2_.assign(cells, 0.0);
   crossDiffusion_.assign(cells, 0.0);
+  crossDiffusionPositive_.assign(cells, 0.0);
   production_.assign(cells, 0.0);
   gradK_.assign(cells, Vec2{});
   gradOmega_.assign(cells, Vec2{});
@@ -238,9 +239,19 @@ void KOmegaSST::computeBlending(const TurbulenceContext& context) {
     const double omega = std::max(omega_[c], kMinOmega);
     const double energy = std::max(k_[c], 0.0);
 
-    // CD_komega: the cross-diffusion term, floored so it can be divided by.
-    const double raw = 2.0 * rho * k.sigmaOmega2 * dot(gradK_[c], gradOmega_[c]) / omega;
-    crossDiffusion_[c] = std::max(raw, 1.0e-10);
+    // The cross-diffusion term, 2 rho sigma_w2 (1/omega) grad(k).grad(omega).
+    //
+    // Two versions are needed and conflating them is a mistake: the term enters
+    // the omega equation as a *source*, where its sign is physical and a
+    // negative value is a real sink, and it enters arg1 below as a
+    // *denominator*, where it has to be positive to divide by. Menter clips
+    // only the second. Clipping the first as well silently deletes every
+    // negative cross-diffusion contribution in the domain - which is most of
+    // the outer boundary layer, where grad(k) and grad(omega) point opposite
+    // ways.
+    crossDiffusion_[c] =
+        2.0 * rho * k.sigmaOmega2 * dot(gradK_[c], gradOmega_[c]) / omega;
+    crossDiffusionPositive_[c] = std::max(crossDiffusion_[c], 1.0e-10);
 
     // arg1 is the smallest of three competing length-scale ratios, each of
     // which is large inside the boundary layer and small outside it:
@@ -251,7 +262,8 @@ void KOmegaSST::computeBlending(const TurbulenceContext& context) {
     //                            cross-diffusion matters
     const double term1 = std::sqrt(std::max(energy, 0.0)) / (k.betaStar * omega * d);
     const double term2 = 500.0 * nu / (d * d * omega);
-    const double term3 = 4.0 * rho * k.sigmaOmega2 * energy / (crossDiffusion_[c] * d * d);
+    const double term3 =
+        4.0 * rho * k.sigmaOmega2 * energy / (crossDiffusionPositive_[c] * d * d);
     const double arg1 = std::min(std::max(term1, term2), term3);
     f1_[c] = std::tanh(std::clamp(arg1 * arg1 * arg1 * arg1, 0.0, 50.0));
 
@@ -485,6 +497,25 @@ void KOmegaSST::solveTransport(const TurbulenceContext& context) {
             kMinOmega);
 }
 
+/// Collect the ranges of k, omega and mu_t for monitoring.
+void KOmegaSST::updateRanges() {
+  ranges_ = TurbulenceRanges{};
+  if (k_.empty()) {
+    return;
+  }
+  ranges_.minEnergy = ranges_.maxEnergy = k_[0];
+  ranges_.minDissipation = ranges_.maxDissipation = omega_[0];
+  ranges_.minEddyViscosity = ranges_.maxEddyViscosity = eddyViscosity_[0];
+  for (std::size_t c = 1; c < k_.size(); ++c) {
+    ranges_.minEnergy = std::min(ranges_.minEnergy, k_[c]);
+    ranges_.maxEnergy = std::max(ranges_.maxEnergy, k_[c]);
+    ranges_.minDissipation = std::min(ranges_.minDissipation, omega_[c]);
+    ranges_.maxDissipation = std::max(ranges_.maxDissipation, omega_[c]);
+    ranges_.minEddyViscosity = std::min(ranges_.minEddyViscosity, eddyViscosity_[c]);
+    ranges_.maxEddyViscosity = std::max(ranges_.maxEddyViscosity, eddyViscosity_[c]);
+  }
+}
+
 void KOmegaSST::update(const TurbulenceContext& context) {
   if (mesh_ == nullptr || context.mesh != mesh_ || context.field == nullptr ||
       context.conditions == nullptr || context.massFlux == nullptr ||
@@ -501,6 +532,7 @@ void KOmegaSST::update(const TurbulenceContext& context) {
   solveTransport(context);
   applyWallConditions(context);
   updateEddyViscosity(context);
+  updateRanges();
 }
 
 }  // namespace cfd::solver

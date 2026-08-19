@@ -1409,6 +1409,14 @@ void updateSurface(UiState& ui) {
 
 namespace {
 
+/// True when k has been driven to its floor anywhere, meaning positivity is
+/// being maintained by clipping rather than by the discretisation.
+[[nodiscard]] bool r_minNegativeGuard(const SolverState& state) noexcept {
+  return state.turbulence != TurbulenceChoice::Laminar && state.iteration > 0 &&
+         state.monitor.turbulenceRanges.maxEnergy > 0.0 &&
+         state.monitor.turbulenceRanges.minEnergy <= 0.0;
+}
+
 /// Frames a sweep waits for the solver to take up a new angle before giving up.
 /// Generous: the request goes through a flow rebuild and a solver rebuild, and
 /// a couple of frames is normal. Anything approaching this means it never took.
@@ -2444,9 +2452,25 @@ void drawSolverPanel(UiState& ui) {
   if (state.turbulence != TurbulenceChoice::Laminar && state.iteration > 0) {
     ImGui::Spacing();
     if (beginInfoTable("solver_turbulence", 104.0f)) {
+      const solver::TurbulenceRanges& r = state.monitor.turbulenceRanges;
+      infoRow(ui, "k", std::format("{:.3e} .. {:.3e}", r.minEnergy, r.maxEnergy));
+      infoRow(ui, "omega", std::format("{:.3e} .. {:.3e}", r.minDissipation,
+                                       r.maxDissipation));
+      infoRow(ui, "mu_t", std::format("{:.3e} .. {:.3e}", r.minEddyViscosity,
+                                      r.maxEddyViscosity));
       infoRow(ui, "mu_t/mu", std::format("up to {:.4g}", state.eddyViscosityRatio));
       infoRow(ui, "y+", std::format("up to {:.3g}", state.wallYPlus));
       ImGui::EndTable();
+    }
+    // k and omega are strictly positive quantities. If either floor is being
+    // touched the model is being held up by clipping rather than by physics,
+    // and that is worth seeing rather than inferring.
+    if (r_minNegativeGuard(state)) {
+      ImGui::PushStyleColor(ImGuiCol_Text, theme::kLevelWarning);
+      ImGui::TextWrapped(
+          "k has reached zero somewhere: the solution is being held positive by "
+          "clipping. Lower the turbulence relaxation.");
+      ImGui::PopStyleColor();
     }
     if (state.wallYPlus > 5.0) {
       ImGui::PushStyleColor(ImGuiCol_Text, theme::kLevelWarning);

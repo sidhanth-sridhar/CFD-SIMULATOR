@@ -193,11 +193,14 @@ void SolverWorker::runLoop() {
 
     if (iteration % kProgressEvery == 0) {
       if (solver_->turbulenceModel() != nullptr) {
+        const solver::TurbulenceRanges& r = monitor.turbulenceRanges;
         CFD_LOG_INFO(kLogCategory,
                      "iteration {}: continuity {:.3e}, momentum {:.3e} / {:.3e}, "
-                     "mu_t/mu up to {:.4g}, y+ up to {:.3g}",
+                     "k {:.3e}..{:.3e}, omega {:.3e}..{:.3e}, mu_t/mu up to {:.4g}, "
+                     "y+ up to {:.3g}",
                      iteration, monitor.residuals.continuity, monitor.residuals.momentumX,
-                     monitor.residuals.momentumY, monitor.maxEddyViscosityRatio,
+                     monitor.residuals.momentumY, r.minEnergy, r.maxEnergy,
+                     r.minDissipation, r.maxDissipation, monitor.maxEddyViscosityRatio,
                      solver_->turbulenceModel()->maxWallYPlus());
       } else {
         CFD_LOG_INFO(kLogCategory, "iteration {}: continuity {:.3e}, momentum {:.3e} / {:.3e}",

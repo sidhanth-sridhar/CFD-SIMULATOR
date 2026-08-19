@@ -144,6 +144,9 @@ struct SolverMonitor {
 
   /// Residuals of the turbulence model's own equations, zero without one.
   TurbulenceResiduals turbulence{};
+  /// Ranges of k, omega and mu_t. The three quantities the brief asks to be
+  /// monitored, carried out of the solver rather than dug out of the model.
+  TurbulenceRanges turbulenceRanges{};
   /// Largest mu_t/mu anywhere. The headline number for whether a turbulence
   /// model is doing anything: order 100 to 1000 in a developed boundary layer,
   /// and order 1 means it is not.

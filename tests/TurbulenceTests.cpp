@@ -23,6 +23,7 @@
 
 #include "cfd/flow/BoundaryConditions.hpp"
 #include "cfd/geom/Airfoil.hpp"
+#include "cfd/mesh/BoxGrid.hpp"
 #include "cfd/mesh/CGrid.hpp"
 #include "cfd/solver/SimpleSolver.hpp"
 #include "cfd/solver/TurbulenceModel.hpp"
@@ -445,6 +446,165 @@ TEST(Turbulence, ProductionIsLimitedRelativeToDissipation) {
   // A tighter cap on production cannot produce *more* turbulence.
   EXPECT_LE(strictPeak, standardPeak * 1.001)
       << "limiting production harder made more eddy viscosity, which is backwards";
+}
+
+
+// ---------------------------------------------------------------------------
+// Independent verification: decaying homogeneous turbulence
+// ---------------------------------------------------------------------------
+
+// The one case where k-omega has an exact closed-form solution, and therefore
+// the only place the source terms can be checked against something other than
+// themselves.
+//
+// Put uniform turbulence in a uniform stream with no walls and no shear. There
+// is no production (S = 0), no wall damping (F1 = 0, so the k-epsilon constants
+// apply), and no transverse gradient, so the transport equations collapse to two
+// ordinary differential equations in x/U:
+//
+//     rho U dk/dx     = -beta* rho k omega
+//     rho U domega/dx = -beta  rho omega^2
+//
+// The second integrates on its own,
+//
+//     omega(x) = omega0 / (1 + beta omega0 x / U)
+//
+// and substituting it into the first gives a power law rather than an
+// exponential - the decay slows as the eddies grow:
+//
+//     k(x) = k0 (1 + beta omega0 x / U)^(-beta*/beta)
+//
+// With the k-epsilon constants beta = 0.0828 and beta* = 0.09 the exponent is
+// -1.087. This is the standard verification case for a two-equation model, and
+// it tests destruction in both equations plus the balance between them.
+TEST(Turbulence, DecayingTurbulenceFollowsTheAnalyticSolution) {
+  // No walls anywhere: the far field takes the stream in on the left and the
+  // top and bottom, and the outlet fixes the pressure level on the right.
+  cfd::mesh::BoxOptions box;
+  box.length = 10.0;
+  box.height = 1.0;
+  box.cellsX = 200;
+  box.cellsY = 4;
+  box.left = cfd::mesh::BoundaryType::Farfield;
+  box.right = cfd::mesh::BoundaryType::Outlet;
+  box.lower = cfd::mesh::BoundaryType::Farfield;
+  box.upper = cfd::mesh::BoundaryType::Farfield;
+
+  auto grid = cfd::mesh::generateBox(box);
+  ASSERT_TRUE(grid) << (grid.hasError() ? grid.error().format() : "");
+  const Mesh& mesh = grid.value();
+
+  FreestreamConditions conditions;
+  conditions.speed = 10.0;
+  conditions.density = 1.0;
+  conditions.reynoldsNumber = 1.0e5;
+  conditions.angleOfAttackDeg = 0.0;
+
+  auto built =
+      cfd::flow::buildFaceConditions(mesh, cfd::flow::BoundaryConditions{}, conditions);
+  ASSERT_TRUE(built);
+
+  auto created = SimpleSolver::create(mesh, built.value(), SimpleSettings{});
+  ASSERT_TRUE(created);
+
+  // Intensity and viscosity ratio chosen so that beta*omega0*L/U is of order
+  // one - enough decay across the domain to be a real test, not so much that
+  // omega falls into its floor.
+  TurbulenceInflow inflow;
+  inflow.intensity = 0.1;        // k0 = 1.5 (0.1 * 10)^2 = 1.5
+  inflow.viscosityRatio = 100.0;
+  SimpleSettings settings;
+  settings.inflow = inflow;
+  auto solver = SimpleSolver::create(mesh, built.value(), settings);
+  ASSERT_TRUE(solver);
+  ASSERT_TRUE(solver.value().setTurbulenceModel(std::make_unique<KOmegaSST>()));
+
+  auto initial = FlowField::uniform(mesh.cellCount(), conditions, 1.0);
+  ASSERT_TRUE(initial);
+  ASSERT_TRUE(solver.value().initialise(initial.value()));
+
+  for (int i = 0; i < 3000; ++i) {
+    const auto monitor = solver.value().iterate();
+    ASSERT_TRUE(std::isfinite(monitor.residuals.continuity)) << "diverged at " << i;
+  }
+
+  const auto* model = dynamic_cast<const KOmegaSST*>(solver.value().turbulenceModel());
+  ASSERT_NE(nullptr, model);
+
+  const SSTConstants c;
+  const double k0 = model->freestreamEnergy();
+  const double omega0 = model->freestreamDissipation();
+  const double U = conditions.speed;
+
+  // Away from walls F1 must be zero, so the k-epsilon constants are the ones in
+  // play. Check that before checking anything that depends on it.
+  for (const double f1 : model->blending()) {
+    EXPECT_LT(f1, 1e-6) << "F1 should vanish with no wall anywhere";
+  }
+
+  // Every cell in the interior, skipping the first tenth where the inflow is
+  // still being felt and the last tenth where the outlet is. Sampling all of y
+  // rather than a centreline also checks the solution came out independent of
+  // y, which it must with no wall and no transverse gradient.
+  int sampled = 0;
+  double worstOmega = 0.0;
+  double worstK = 0.0;
+  for (std::size_t cell = 0; cell < mesh.cellCount(); ++cell) {
+    const cfd::Vec2 centre = mesh.cellCentroids()[cell];
+    const double x = centre.x;
+    if (x < 1.0 || x > 9.0) {
+      continue;
+    }
+
+    const double growth = 1.0 + c.beta2 * omega0 * x / U;
+    const double omegaExact = omega0 / growth;
+    const double kExact = k0 * std::pow(growth, -c.betaStar / c.beta2);
+
+    worstOmega = std::max(worstOmega,
+                          std::abs(model->specificDissipation()[cell] - omegaExact) / omegaExact);
+    worstK = std::max(worstK, std::abs(model->turbulentEnergy()[cell] - kExact) / kExact);
+    ++sampled;
+  }
+  ASSERT_GT(sampled, 50);
+
+  // Measured: 1.5% in omega and 1.7% in k at 200 cells across the decay. The
+  // residue is discretisation, not modelling - first-order upwind in x, plus a
+  // streamwise diffusion term the analytic solution has no counterpart for.
+  // The bounds are set at roughly twice the measured error, tight enough that a
+  // wrong constant or a dropped term would fail immediately.
+  EXPECT_LT(worstOmega, 0.03) << "omega departs from omega0/(1 + beta omega0 x/U)";
+  EXPECT_LT(worstK, 0.035) << "k departs from the power law";
+}
+
+// The cross-diffusion term is a *source*, and its sign is physical. Clipping it
+// positive - which is only correct inside F1's argument, where it is a
+// denominator - silently deletes every negative contribution, and in the outer
+// part of a boundary layer grad(k) and grad(omega) point opposite ways so most
+// of them are negative.
+TEST(Turbulence, CrossDiffusionKeepsItsSignInTheSourceTerm) {
+  const Mesh& mesh = sharedMesh();
+  const FreestreamConditions conditions = stream();
+
+  auto created = SimpleSolver::create(mesh, faces(mesh, conditions), SimpleSettings{});
+  ASSERT_TRUE(created);
+  ASSERT_TRUE(created.value().setTurbulenceModel(std::make_unique<KOmegaSST>()));
+  ASSERT_TRUE(created.value().initialise(uniform(mesh, conditions)));
+  for (int i = 0; i < 150; ++i) {
+    created.value().iterate();
+  }
+
+  const auto* model = dynamic_cast<const KOmegaSST*>(created.value().turbulenceModel());
+  ASSERT_NE(nullptr, model);
+
+  std::size_t negative = 0;
+  for (const double cd : model->crossDiffusion()) {
+    EXPECT_TRUE(std::isfinite(cd));
+    if (cd < 0.0) {
+      ++negative;
+    }
+  }
+  EXPECT_GT(negative, 0u)
+      << "no cell has negative cross-diffusion, which means it is being clipped";
 }
 
 }  // namespace

@@ -495,10 +495,29 @@ present.
 
 **k-ω SST** is the first concrete model — the 2003 form with standard constants,
 F1/F2 blending, cross-diffusion, the shear-stress limiter, the production
-limiter, and Menter's low-Reynolds wall treatment (ω = 60ν/β₁d² imposed at the
-first cell). There is no wall function, so it needs y+ of order 1; the model
-reports the y+ it achieved so that being used outside its range is visible
-rather than silent.
+limiter, and Menter's low-Reynolds wall treatment. There is no wall function, so
+it needs y+ of order 1; the model reports the y+ it achieved so that being used
+outside its range is visible rather than silent.
+
+**The exact equations implemented, and every simplification made, are written
+out in [`include/cfd/solver/KOmegaSST.hpp`](include/cfd/solver/KOmegaSST.hpp)** —
+the equations of the code, not of the paper. The five documented simplifications
+are: the −⅔ρk part of the Boussinesq stress absorbed into pressure; the ω
+production unlimited while the k production is limited; first-order upwind
+convection for k and ω; no transition model; and no compressibility, buoyancy or
+curvature corrections.
+
+**Independent verification.** Decaying homogeneous turbulence is the one
+configuration where these equations have a closed-form solution — no walls, no
+shear, so they collapse to ODEs in x/U giving ω = ω₀/(1+βω₀x/U) and
+k = k₀(1+βω₀x/U)^(−β*/β). The solver reproduces it to **1.5% in ω and 1.7% in k**
+over a decade of decay, which tests the destruction terms and their balance
+against something other than themselves.
+
+**Monitoring.** k, ω and μ_t ranges are reported in the periodic log line and the
+Solve panel, along with y+ and μ_t/μ. The panel warns if k reaches its floor
+anywhere, since that means positivity is being maintained by clipping rather
+than by the discretisation.
 
 ```sh
 cfd_sim --section "NACA 0012" --mesh fine --reynolds 1e6 \

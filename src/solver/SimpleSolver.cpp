@@ -777,8 +777,8 @@ SolverMonitor SimpleSolver::iterate() {
     turbulence_->update(context);
     applyEddyViscosity();
 
-    const TurbulenceResiduals turbulent = turbulence_->residuals();
-    monitor.turbulence = turbulent;
+    monitor.turbulence = turbulence_->residuals();
+    monitor.turbulenceRanges = turbulence_->ranges();
     monitor.maxEddyViscosityRatio = 0.0;
     const std::vector<double>& eddy = turbulence_->eddyViscosity();
     for (std::size_t c = 0; c < eddy.size(); ++c) {
