@@ -174,11 +174,29 @@ enum class FieldView {
   VelocityX,
   VelocityY,
   Pressure,
+  /// Pressure as the coefficient (p - p_inf)/q, which is what makes one
+  /// solution comparable with another at a different speed or scale.
+  PressureCoefficient,
+  /// du/dy - dv/dx. Zero in irrotational flow, so it picks out exactly the
+  /// boundary layer and the wake and nothing else - the clearest single view of
+  /// where viscosity has actually done something.
+  Vorticity,
+  /// Turbulent kinetic energy, m^2/s^2. Empty without a turbulence model.
+  TurbulentEnergy,
+  /// Specific dissipation rate, 1/s. Spans six decades between the wall and the
+  /// freestream, so it is shown on a logarithmic scale.
+  SpecificDissipation,
+  /// Eddy viscosity as a multiple of the molecular value. The direct answer to
+  /// "how hard is the turbulence model mixing, and where".
+  EddyViscosityRatio,
   /// Net volume flux per unit area. Zero everywhere for an incompressible
   /// solution, so any structure here is error - which makes it the most
   /// informative thing to look at before a solver exists.
   Divergence,
 };
+
+/// True where a view needs a turbulence model to mean anything.
+[[nodiscard]] bool needsTurbulence(FieldView view) noexcept;
 
 [[nodiscard]] std::string_view toString(FieldView view) noexcept;
 /// True where the sign of the quantity carries meaning, so it wants a
@@ -200,6 +218,12 @@ struct FlowState {
   /// what is here?"; comparing 105,410 cells would defeat the purpose.
   std::uint64_t revision{0};
   std::vector<double> divergence;
+  /// Vorticity per cell, recomputed whenever the field changes.
+  std::vector<double> vorticity;
+  /// Copies of the turbulence model's fields, empty without one.
+  std::vector<double> turbulentEnergy;
+  std::vector<double> dissipation;
+  std::vector<double> eddyViscosity;
   flow::ResidualSet residuals;
   flow::TimeState clock;
   flow::ResidualHistory history;

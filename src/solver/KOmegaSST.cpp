@@ -144,8 +144,20 @@ Status KOmegaSST::initialise(const mesh::Mesh& mesh, const flow::FaceConditions&
 
   const double intensity = std::max(inflow.intensity, 1.0e-8);
   kInflow_ = 1.5 * (intensity * referenceSpeed) * (intensity * referenceSpeed);
-  const double eddyViscosity = inflow.viscosityRatio * referenceViscosity;
-  omegaInflow_ = std::max(referenceDensity * kInflow_ / eddyViscosity, kMinOmega);
+
+  // omega from whichever of the two equivalent statements was given.
+  double eddyViscosity = 0.0;
+  if (inflow.lengthScale > 0.0) {
+    // omega = sqrt(k) / (beta*^(1/4) L), the eddy-size form.
+    omegaInflow_ = std::max(
+        std::sqrt(kInflow_) / (std::pow(constants_.betaStar, 0.25) * inflow.lengthScale),
+        kMinOmega);
+    eddyViscosity = referenceDensity * kInflow_ / omegaInflow_;
+  } else {
+    // mu_t = rho k / omega, inverted for omega with mu_t set by the ratio.
+    eddyViscosity = inflow.viscosityRatio * referenceViscosity;
+    omegaInflow_ = std::max(referenceDensity * kInflow_ / eddyViscosity, kMinOmega);
+  }
 
   k_.assign(cells, kInflow_);
   omega_.assign(cells, omegaInflow_);

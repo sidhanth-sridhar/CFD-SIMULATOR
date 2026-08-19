@@ -250,10 +250,21 @@ void SolverWorker::runLoop() {
         pending_.diverged = diverged;
         pending_.running = running_.load();
         pending_.maxEddyViscosityRatio = monitor.maxEddyViscosityRatio;
-        pending_.wallYPlus =
-            (solver_->turbulenceModel() != nullptr)
-                ? solver_->turbulenceModel()->maxWallYPlus()
-                : 0.0;
+        const solver::TurbulenceModel* model = solver_->turbulenceModel();
+        pending_.wallYPlus = (model != nullptr) ? model->maxWallYPlus() : 0.0;
+        if (model != nullptr) {
+          if (const auto* k = model->turbulentEnergyField(); k != nullptr) {
+            pending_.turbulentEnergy = *k;
+          }
+          if (const auto* w = model->dissipationField(); w != nullptr) {
+            pending_.dissipation = *w;
+          }
+          pending_.eddyViscosity = model->eddyViscosity();
+        } else {
+          pending_.turbulentEnergy.clear();
+          pending_.dissipation.clear();
+          pending_.eddyViscosity.clear();
+        }
         hasPending_ = true;
       }
     }

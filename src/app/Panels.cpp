@@ -15,6 +15,7 @@
 
 #include "cfd/core/BuildInfo.hpp"
 #include "cfd/geom/Naca4.hpp"
+#include "cfd/solver/Gradient.hpp"
 
 namespace cfd::app {
 namespace {
@@ -410,6 +411,29 @@ double fieldValue(const UiState& ui, FieldView view, std::size_t c) {
     case FieldView::VelocityX:         return field.velocity[c].x;
     case FieldView::VelocityY:         return field.velocity[c].y;
     case FieldView::Pressure:          return field.pressure[c];
+    case FieldView::PressureCoefficient: {
+      const double q = ui.flow.freestream.dynamicPressure();
+      return (q > 0.0) ? (field.pressure[c] - ui.flow.freestream.referencePressure) / q : 0.0;
+    }
+    case FieldView::Vorticity:
+      return (c < ui.flow.vorticity.size()) ? ui.flow.vorticity[c] : 0.0;
+    case FieldView::TurbulentEnergy:
+      return (c < ui.flow.turbulentEnergy.size()) ? ui.flow.turbulentEnergy[c] : 0.0;
+    case FieldView::SpecificDissipation:
+      // Six decades between the wall and the freestream, so a linear map would
+      // show one bright cell against a uniform floor. log10 is the only way this
+      // view carries information.
+      return (c < ui.flow.dissipation.size())
+                 ? std::log10(std::max(ui.flow.dissipation[c], 1e-12))
+                 : 0.0;
+    case FieldView::EddyViscosityRatio: {
+      if (c >= ui.flow.eddyViscosity.size()) {
+        return 0.0;
+      }
+      const double mu = ui.flow.freestream.dynamicViscosity(
+          ui.geometry.airfoil.has_value() ? ui.geometry.airfoil->chord() : 1.0);
+      return (mu > 0.0) ? ui.flow.eddyViscosity[c] / mu : 0.0;
+    }
     case FieldView::Divergence:
       return (c < ui.flow.divergence.size()) ? ui.flow.divergence[c] : 0.0;
   }
@@ -934,13 +958,29 @@ std::string_view toString(TurbulenceChoice choice) noexcept {
   return "Laminar";
 }
 
+bool needsTurbulence(FieldView view) noexcept {
+  switch (view) {
+    case FieldView::TurbulentEnergy:
+    case FieldView::SpecificDissipation:
+    case FieldView::EddyViscosityRatio:
+      return true;
+    default:
+      return false;
+  }
+}
+
 std::string_view toString(FieldView view) noexcept {
   switch (view) {
-    case FieldView::VelocityMagnitude: return "Velocity magnitude";
-    case FieldView::VelocityX:         return "Velocity x";
-    case FieldView::VelocityY:         return "Velocity y";
-    case FieldView::Pressure:          return "Pressure";
-    case FieldView::Divergence:        return "Divergence";
+    case FieldView::VelocityMagnitude:   return "Velocity magnitude";
+    case FieldView::VelocityX:           return "Velocity x";
+    case FieldView::VelocityY:           return "Velocity y";
+    case FieldView::Pressure:            return "Pressure";
+    case FieldView::PressureCoefficient: return "Cp";
+    case FieldView::Vorticity:           return "Vorticity";
+    case FieldView::TurbulentEnergy:     return "k";
+    case FieldView::SpecificDissipation: return "omega (log10)";
+    case FieldView::EddyViscosityRatio:  return "mu_t / mu";
+    case FieldView::Divergence:          return "Divergence";
   }
   return "Unknown";
 }
@@ -949,13 +989,67 @@ bool isSignedField(FieldView view) noexcept {
   switch (view) {
     case FieldView::VelocityX:
     case FieldView::VelocityY:
+    case FieldView::PressureCoefficient:
+    case FieldView::Vorticity:
     case FieldView::Divergence:
       return true;
     case FieldView::VelocityMagnitude:
     case FieldView::Pressure:
+    case FieldView::TurbulentEnergy:
+    case FieldView::SpecificDissipation:
+    case FieldView::EddyViscosityRatio:
       return false;
   }
   return false;
+}
+
+/// Vorticity, dv/dx - du/dy, per cell.
+///
+/// Recomputed here rather than taken from the solver because the solver's
+/// gradients live on the worker thread and are not published; this is a
+/// Green-Gauss reconstruction from the same face interpolation the viewport
+/// already has. Zero in irrotational flow, so the view picks out the boundary
+/// layer and the wake and nothing else.
+void refreshVorticity(UiState& ui) {
+  ui.flow.vorticity.clear();
+  if (ui.meshing.mesh == nullptr || !ui.flow.field.has_value()) {
+    return;
+  }
+  const mesh::Mesh& grid = *ui.meshing.mesh;
+  const flow::FlowField& field = *ui.flow.field;
+  if (field.size() != grid.cellCount()) {
+    return;
+  }
+
+  std::vector<double> faceU(grid.faceCount(), 0.0);
+  std::vector<double> faceV(grid.faceCount(), 0.0);
+  for (std::size_t f = 0; f < grid.faceCount(); ++f) {
+    const mesh::Face& face = grid.faces()[f];
+    const auto owner = static_cast<std::size_t>(face.owner);
+    const int other = (face.neighbour >= 0) ? face.neighbour : mesh::oppositeCell(grid, f);
+    if (other >= 0) {
+      const double w = solver::ownerWeight(grid, f);
+      const auto n = static_cast<std::size_t>(other);
+      faceU[f] = w * field.velocity[owner].x + (1.0 - w) * field.velocity[n].x;
+      faceV[f] = w * field.velocity[owner].y + (1.0 - w) * field.velocity[n].y;
+    } else if (ui.flow.faces.has_value()) {
+      faceU[f] = ui.flow.faces->velocity[f].x;
+      faceV[f] = ui.flow.faces->velocity[f].y;
+    } else {
+      faceU[f] = field.velocity[owner].x;
+      faceV[f] = field.velocity[owner].y;
+    }
+  }
+
+  auto gradU = solver::greenGaussGradient(grid, faceU);
+  auto gradV = solver::greenGaussGradient(grid, faceV);
+  if (!gradU || !gradV) {
+    return;
+  }
+  ui.flow.vorticity.resize(grid.cellCount());
+  for (std::size_t c = 0; c < grid.cellCount(); ++c) {
+    ui.flow.vorticity[c] = gradV.value()[c].x - gradU.value()[c].y;
+  }
 }
 
 void refreshFieldRange(UiState& ui) {
@@ -964,13 +1058,47 @@ void refreshFieldRange(UiState& ui) {
     return;
   }
 
-  double low = std::numeric_limits<double>::max();
-  double high = std::numeric_limits<double>::lowest();
+  // Percentiles, not the extremes.
+  //
+  // Several of these fields are almost all background with a thin, violently
+  // intense feature in them: vorticity is enormous in the first cell off the
+  // wall and essentially zero everywhere else, omega spans six decades over the
+  // same distance, and eddy viscosity lives entirely inside the boundary layer.
+  // Scaling to min and max gives those few cells the whole colour map and
+  // renders the rest a flat wash - which is exactly what the first attempt at
+  // these views produced. Trimming a couple of per cent from each end costs
+  // nothing on a smooth field and makes a spiky one legible.
+  //
+  // The trimmed cells are not hidden: the map clamps, so they saturate at the
+  // ends and remain visibly extreme.
+  std::vector<double> values;
+  values.reserve(state.field->size());
   for (std::size_t c = 0; c < state.field->size(); ++c) {
     const double value = fieldValue(ui, state.view, c);
-    low = std::min(low, value);
-    high = std::max(high, value);
+    if (std::isfinite(value)) {
+      values.push_back(value);
+    }
   }
+  if (values.empty()) {
+    return;
+  }
+
+  const auto percentile = [&values](double fraction) {
+    const auto index = static_cast<std::size_t>(fraction * static_cast<double>(values.size() - 1));
+    std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(index),
+                     values.end());
+    return values[index];
+  };
+  double low = percentile(0.02);
+  double high = percentile(0.98);
+
+  if (!(high > low)) {
+    // A field that is uniform to within the trim: fall back to the extremes so
+    // something is shown rather than a degenerate range.
+    low = *std::min_element(values.begin(), values.end());
+    high = *std::max_element(values.begin(), values.end());
+  }
+
   if (isSignedField(state.view)) {
     // Centre a signed map on zero so the neutral colour means zero.
     const double extent = std::max(std::abs(low), std::abs(high));
@@ -1070,6 +1198,7 @@ void updateFlow(UiState& ui) {
     }
   }
 
+  refreshVorticity(ui);
   refreshFieldRange(ui);
 
   // The state is an initialisation, not the result of a step, so the clock
@@ -1226,7 +1355,11 @@ bool updateSolver(UiState& ui) {
     ui.flow.field = std::move(update.field);
     ui.flow.divergence = std::move(update.divergence);
     ui.flow.residuals = update.monitor.residuals;
+    ui.flow.turbulentEnergy = std::move(update.turbulentEnergy);
+    ui.flow.dissipation = std::move(update.dissipation);
+    ui.flow.eddyViscosity = std::move(update.eddyViscosity);
     ++ui.flow.revision;
+    refreshVorticity(ui);
     // The field has moved, so the colour map has to move with it. Leaving the
     // range from the uniform starting state makes every solved value saturate,
     // which reads as a broken solution rather than a stale legend.
@@ -2201,6 +2334,11 @@ void drawFlowPanel(UiState& ui) {
               1e9);
     scalarRow("Pressure", "##pref", &state.freestream.referencePressure, 1.0f, "%.4g Pa",
               -1e9, 1e9);
+    // Viscosity is normally derived from the Reynolds number - see the note in
+    // Freestream.hpp - but a positive value here inverts that and makes Re the
+    // derived quantity, for anyone modelling a specific fluid.
+    scalarRow("Viscosity", "##mu", &state.freestream.dynamicViscosityOverride, 1e-6f,
+              "%.4g Pa.s (0 = from Re)", 0.0, 1e3);
     ImGui::EndTable();
   }
   ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDisabled);
@@ -2208,6 +2346,35 @@ void drawFlowPanel(UiState& ui) {
                      "continues from the field already solved rather than starting cold, "
                      "and a converged run picks itself back up.");
   ImGui::PopStyleColor();
+
+  // Freestream turbulence. Only meaningful with a model attached, so it is
+  // shown disabled rather than hidden - the inputs exist either way, and hiding
+  // them would make the laminar case look like a different program.
+  ImGui::Spacing();
+  ImGui::SeparatorText("Freestream turbulence");
+  ImGui::BeginDisabled(ui.solving.turbulence == TurbulenceChoice::Laminar);
+  if (beginInfoTable("flow_turbulence", 104.0f)) {
+    const auto row = [&](const char* label, const char* id, double* value, float step,
+                         const char* fmt, double low, double high) {
+      ImGui::TableNextRow();
+      ImGui::TableSetColumnIndex(0);
+      ImGui::TextColored(theme::kTextDim, "%s", label);
+      ImGui::TableSetColumnIndex(1);
+      ImGui::SetNextItemWidth(-FLT_MIN);
+      if (ImGui::DragScalar(id, ImGuiDataType_Double, value, step, nullptr, nullptr, fmt)) {
+        *value = std::clamp(*value, low, high);
+        ui.solving.dirty = true;
+      }
+    };
+    row("Intensity", "##ti", &ui.solving.settings.inflow.intensity, 0.0002f, "%.4g", 0.0,
+        1.0);
+    row("mu_t/mu", "##tvr", &ui.solving.settings.inflow.viscosityRatio, 0.05f, "%.4g", 1e-6,
+        1e6);
+    row("Length", "##tls", &ui.solving.settings.inflow.lengthScale, 0.0005f,
+        "%.4g m (0 = use ratio)", 0.0, 1e4);
+    ImGui::EndTable();
+  }
+  ImGui::EndDisabled();
 
   if (!state.errorMessage.empty()) {
     ImGui::PushStyleColor(ImGuiCol_Text, theme::kLevelError);

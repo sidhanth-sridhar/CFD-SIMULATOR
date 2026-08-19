@@ -20,11 +20,16 @@ double FreestreamConditions::dynamicPressure() const noexcept {
 }
 
 double FreestreamConditions::dynamicViscosity(double chord) const noexcept {
-  if (!(reynoldsNumber > 0.0) || !(chord > 0.0)) {
-    return 0.0;
+  // A stated viscosity wins; otherwise it follows from the Reynolds number.
+  if (dynamicViscosityOverride > 0.0) {
+    return dynamicViscosityOverride;
   }
-  // Re = rho*U*c/mu, rearranged.
-  return density * speed * chord / reynoldsNumber;
+  return (reynoldsNumber > 0.0) ? density * speed * chord / reynoldsNumber : 0.0;
+}
+
+double FreestreamConditions::effectiveReynolds(double chord) const noexcept {
+  const double mu = dynamicViscosity(chord);
+  return (mu > 0.0) ? density * speed * chord / mu : 0.0;
 }
 
 double FreestreamConditions::kinematicViscosity(double chord) const noexcept {

@@ -3,8 +3,8 @@
 A 2D Reynolds-Averaged Navier-Stokes solver for NACA airfoil sections, with an
 interactive viewer.
 
-**Status: Phase 8 — Reynolds-averaged with a k-omega SST closure, running at
-Re = 10⁶ and validated against published values.**
+**Status: Phase 10 — full RANS simulation of NACA four-digit sections at
+realistic Reynolds numbers, with k-ω SST.**
 
 The application generates NACA four-digit sections, builds a structured C-grid
 around them, solves the steady incompressible Navier-Stokes equations on them
@@ -96,9 +96,13 @@ Add `--output-on-failure` to see diagnostics from failing tests.
 | `--section NAME` | Load a section at startup, e.g. `--section "NACA 2412"` |
 | `--mesh LEVEL` | Mesh at startup: `coarse`, `medium` or `fine` |
 | `--flow` | Initialise the flow at startup (implies a mesh) |
-| `--field NAME` | Shown scalar: `velocity`, `vx`, `vy`, `pressure`, `divergence` |
+| `--field NAME` | Shown scalar: `velocity`, `vx`, `vy`, `pressure`, `cp`, `vorticity`, `k`, `omega`, `mut`, `divergence` |
 | `--solve` | Start the solver running at startup (implies `--flow`) |
 | `--reynolds N` | Reynolds number based on the chord |
+| `--viscosity MU` | Dynamic viscosity in Pa.s; the Reynolds number then follows from it |
+| `--intensity I` | Freestream turbulence intensity u′/U |
+| `--eddy-ratio R` | Freestream μ_t/μ |
+| `--length-scale L` | Turbulent length scale in metres, instead of the ratio |
 | `--alpha DEG` | Angle of attack in degrees |
 | `--polar A:B:S` | Sweep incidence from A to B in steps of S degrees, write the polar and exit |
 | `--polar-csv FILE` | Where the sweep writes its CSV (default `polar.csv`) |
@@ -953,6 +957,70 @@ and short of the asymptotic range in lift. The same numerical diffusion that
 inflates drag also thickens the boundary layer and caps peak lift, so a low
 C<sub>l,max</sub> and a high C<sub>d</sub> are one error, not two.
 
+### Running a RANS case
+
+Everything the simulation takes as input, and where it is set:
+
+| Input | UI | Command line |
+|---|---|---|
+| Section (any valid NACA four-digit) | Geometry panel | `--section "NACA 4412"` |
+| Angle of attack | Flow panel slider, ±20° | `--alpha 4` |
+| Freestream speed | Flow panel | — |
+| Density | Flow panel | — |
+| Reynolds number | Flow panel | `--reynolds 1e6` |
+| Dynamic viscosity | Flow panel (0 = derive from Re) | `--viscosity 1.8e-5` |
+| Turbulence intensity | Flow panel | `--intensity 0.01` |
+| Turbulence length scale | Flow panel (0 = use μ_t/μ) | `--length-scale 0.01` |
+| Freestream μ_t/μ | Flow panel | `--eddy-ratio 5` |
+| Closure | Solve panel | `--turbulence sst` |
+| Wall spacing | Mesh panel | `--first-layer 2.5e-5` |
+
+**Reynolds number and viscosity are two ways of saying one thing.** By default
+the Reynolds number is the input and viscosity follows, which is how aerofoil
+work is normally posed. Giving a viscosity inverts that: μ is taken as stated
+and the Reynolds number becomes the derived quantity, for anyone modelling a
+specific fluid at a specific speed.
+
+**Turbulence intensity and length scale likewise.** k comes from the intensity,
+k = 1.5(IU)², and ω from *either* a length scale, ω = √k/(β*^¼L), *or* an
+eddy-viscosity ratio. Downstream of a grid or screen the eddy size is the
+quantity anyone actually knows; for a clean tunnel there is no such length and a
+small μ_t/μ is the honest way to say the freestream is not doing the mixing.
+
+> **Changing the Reynolds number means changing the wall spacing too.** y+ scales
+> as y·Re^0.9, so a mesh that resolves the viscous sublayer at Re = 10⁵ has
+> y+ ≈ 10 at Re = 10⁷ and the low-Reynolds wall treatment is no longer valid.
+> Holding `--first-layer` fixed across two decades of Reynolds number measured an
+> 11% fall in friction drag where theory gives 60% — that was the mesh going
+> stale, not the physics. As a starting point, 2.5×10⁻⁵ chords gives y+ ≈ 1.2 at
+> Re = 10⁶, and scales as Re^−0.9 from there. The Solve panel reports the y+
+> actually achieved.
+
+### What can be shown
+
+| View | What it is for |
+|---|---|
+| Velocity magnitude, u, v | The flow itself |
+| Pressure | Raw, in Pa |
+| **Cp** | (p − p∞)/q — the same field made comparable between speeds and scales |
+| **Vorticity** | ∂v/∂x − ∂u/∂y. Zero in irrotational flow, so it picks out the boundary layer and the wake and nothing else |
+| **k** | Turbulent kinetic energy |
+| **ω** | Specific dissipation, on a log₁₀ scale because it spans six decades between the wall and the freestream |
+| **μ_t/μ** | How hard the turbulence model is mixing, and where |
+| Divergence | Should be zero; any structure is error |
+
+Wall shear is drawn along the section itself, coloured by sign and magnitude with
+separation ringed, and Cp and Cf are plotted against x/c in the Surface panel —
+both from Phase 5.
+
+**The colour range is taken from the 2nd and 98th percentiles**, not the extremes.
+Several of these fields are almost all background with a thin, intense feature in
+them: vorticity is enormous in the first cell off the wall and negligible
+elsewhere, ω spans six decades over the same distance. Scaling to min and max
+gives those few cells the entire colour map and renders everything else a flat
+wash — the first attempt at the k, ω and μ_t views was uniformly blank. Trimmed
+cells still saturate at the ends of the map rather than being hidden.
+
 ## Dependencies## Dependencies
 
 | Library | Version | Role | Fetched |
@@ -967,7 +1035,7 @@ reproduces the exact same sources or fails loudly.
 
 ## Roadmap
 
-Phases 0 to 8 are complete. Later phases build on them in order:
+Phases 0 to 10 are complete. Later phases build on them in order:
 
 1. ~~NACA 4-digit geometry generation~~ — done
 2. ~~Mesh generation around the section~~ — done
@@ -976,9 +1044,10 @@ Phases 0 to 8 are complete. Later phases build on them in order:
 5. ~~Force and moment integration (lift, drag, moment coefficients)~~ — done
 6. ~~Angle-of-attack sweeps and polars~~ — done
 7. ~~Reynolds averaging and a k-ω SST closure~~ — done
-8. A convection scheme that converges at second order — the single largest source of error left
-9. Transition modelling; comparison against digitised wind-tunnel data
-10. Vortex structures and post-stall behaviour
+8. ~~Full RANS around NACA sections, with every input and field exposed~~ — done
+9. A convection scheme that converges at second order — the single largest source of error left
+10. Transition modelling; comparison against digitised wind-tunnel data
+11. Vortex structures and post-stall behaviour
 
 ## Documentation
 

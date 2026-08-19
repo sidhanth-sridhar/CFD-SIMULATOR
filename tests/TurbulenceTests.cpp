@@ -26,7 +26,11 @@
 #include "cfd/mesh/BoxGrid.hpp"
 #include "cfd/mesh/CGrid.hpp"
 #include "cfd/solver/SimpleSolver.hpp"
+#include "cfd/post/Forces.hpp"
+#include "cfd/post/SurfaceData.hpp"
 #include "cfd/solver/TurbulenceModel.hpp"
+
+#include <string_view>
 
 namespace {
 
@@ -605,6 +609,216 @@ TEST(Turbulence, CrossDiffusionKeepsItsSignInTheSourceTerm) {
   }
   EXPECT_GT(negative, 0u)
       << "no cell has negative cross-diffusion, which means it is being clipped";
+}
+
+
+// ---------------------------------------------------------------------------
+// The RANS simulation responds to its inputs
+// ---------------------------------------------------------------------------
+//
+// Four claims that are easy to assume and worth pinning down: a solver can look
+// entirely convincing while quietly ignoring one of its inputs. Each of these
+// changes exactly one thing and requires the answer to move.
+
+/// Solve a section at given conditions and return its force coefficients.
+/// Wall spacing that keeps y+ of order one at a given Reynolds number.
+///
+/// y+ = u_tau y / nu with u_tau ~ U sqrt(Cf/2) and Cf ~ Re^-0.2, so y+ scales as
+/// y Re^0.9. Holding the mesh fixed while changing Re therefore changes y+ by
+/// almost the same factor, and a low-Reynolds wall treatment stops being valid.
+/// Anchored on 2.5e-5 chords at Re = 10^6, which measures y+ = 1.2.
+double firstLayerFor(double reynolds) {
+  return 2.5e-5 * std::pow(1.0e6 / reynolds, 0.9);
+}
+
+cfd::post::AerodynamicForces solveSection(std::string_view designation,
+                                          const FreestreamConditions& conditions,
+                                          const TurbulenceInflow& inflow, int iterations) {
+  auto section = cfd::geom::makeNaca4Digit(
+      designation, {.chord = 1.0, .trailingEdge = cfd::geom::TrailingEdge::Closed});
+  EXPECT_TRUE(section);
+
+  cfd::mesh::CGridOptions options = cfd::mesh::optionsFor(cfd::mesh::MeshResolution::Coarse);
+  options.surfacePoints = 60;
+  options.wakePoints = 24;
+  options.normalPoints = 40;
+  options.firstLayerHeight = firstLayerFor(conditions.effectiveReynolds(1.0));
+  auto grid = cfd::mesh::generateCGrid(section.value(), options);
+  EXPECT_TRUE(grid) << (grid.hasError() ? grid.error().format() : "");
+  static std::vector<std::unique_ptr<Mesh>> kept;  // outlive the solver
+  kept.push_back(std::make_unique<Mesh>(std::move(grid).value()));
+  const Mesh& mesh = *kept.back();
+
+  auto built =
+      cfd::flow::buildFaceConditions(mesh, cfd::flow::BoundaryConditions{}, conditions);
+  EXPECT_TRUE(built);
+
+  SimpleSettings settings;
+  settings.inflow = inflow;
+  auto solver = SimpleSolver::create(mesh, built.value(), settings);
+  EXPECT_TRUE(solver);
+  EXPECT_TRUE(solver.value().setTurbulenceModel(std::make_unique<KOmegaSST>()));
+
+  auto initial = FlowField::uniform(mesh.cellCount(), conditions, 1.0);
+  EXPECT_TRUE(initial);
+  EXPECT_TRUE(solver.value().initialise(initial.value()));
+  for (int i = 0; i < iterations; ++i) {
+    solver.value().iterate();
+  }
+
+  auto surface = cfd::post::extractSurface(mesh, solver.value().field(), conditions, 1.0);
+  EXPECT_TRUE(surface) << (surface.hasError() ? surface.error().format() : "");
+  auto forces = cfd::post::integrateForces(surface.value(), conditions);
+  EXPECT_TRUE(forces) << (forces.hasError() ? forces.error().format() : "");
+  return std::move(forces).value();
+}
+
+// Camber is the whole difference between these three sections, and it shows up
+// as lift at zero incidence: a symmetric section has none, and more camber gives
+// more. If the geometry were not reaching the solver this would be three
+// identical numbers.
+TEST(Rans, ChangingTheSectionChangesTheFlow) {
+  FreestreamConditions conditions;
+  conditions.speed = 1.0;
+  conditions.density = 1.0;
+  conditions.reynoldsNumber = 1.0e6;
+  conditions.angleOfAttackDeg = 0.0;
+
+  const TurbulenceInflow inflow;
+  const double symmetric = solveSection("0012", conditions, inflow, 600).liftCoefficient;
+  const double mild = solveSection("2412", conditions, inflow, 600).liftCoefficient;
+  const double strong = solveSection("4412", conditions, inflow, 600).liftCoefficient;
+
+  EXPECT_NEAR(symmetric, 0.0, 0.02) << "a symmetric section must not lift at zero alpha";
+  EXPECT_GT(mild, 0.05) << "2% camber should lift at zero incidence";
+  EXPECT_GT(strong, mild) << "4% camber should lift more than 2%";
+}
+
+// Reynolds number sets the balance between inertia and viscosity, so friction
+// drag must fall as it rises: flat-plate theory gives Cf ~ Re^-0.2, a 37% drop
+// per decade.
+//
+// The wall spacing is scaled with Re rather than held fixed. That is not a
+// convenience - y+ scales as y Re^0.9, so a mesh that resolves the sublayer at
+// one Reynolds number does not at another, and holding it fixed measures the
+// mesh going stale rather than the physics. With a fixed 5e-5 wall spacing this
+// test showed an 11% fall across two decades instead of the expected 60%.
+TEST(Rans, ChangingReynoldsNumberChangesTheFlow) {
+  FreestreamConditions low;
+  low.speed = 1.0;
+  low.density = 1.0;
+  low.angleOfAttackDeg = 0.0;
+  low.reynoldsNumber = 1.0e5;
+
+  FreestreamConditions high = low;
+  high.reynoldsNumber = 1.0e6;
+
+  const TurbulenceInflow inflow;
+  const auto slow = solveSection("0012", low, inflow, 800);
+  const auto fast = solveSection("0012", high, inflow, 800);
+
+  // One decade: theory says a factor of 10^0.2 = 1.58. Asserting 1.15 leaves
+  // room for the section not being a flat plate and the mesh being coarse,
+  // while still failing outright if Reynolds number is not reaching the answer.
+  EXPECT_GT(slow.frictionDragCoefficient, fast.frictionDragCoefficient * 1.15)
+      << "friction drag barely moved across a decade of Reynolds number: "
+      << slow.frictionDragCoefficient << " vs " << fast.frictionDragCoefficient;
+}
+
+TEST(Rans, ChangingIncidenceChangesTheFlow) {
+  FreestreamConditions level;
+  level.speed = 1.0;
+  level.density = 1.0;
+  level.reynoldsNumber = 1.0e6;
+  level.angleOfAttackDeg = 0.0;
+
+  FreestreamConditions pitched = level;
+  pitched.angleOfAttackDeg = 6.0;
+
+  const TurbulenceInflow inflow;
+  const double flat = solveSection("0012", level, inflow, 600).liftCoefficient;
+  const double lifting = solveSection("0012", pitched, inflow, 600).liftCoefficient;
+
+  EXPECT_NEAR(flat, 0.0, 0.02);
+  EXPECT_GT(lifting, 0.3) << "six degrees on a 12% section should lift";
+}
+
+// The one most easily got wrong, because a model can be attached and still be
+// ignoring what it was told about the oncoming stream. A hundredfold change in
+// freestream turbulence has to reach the answer.
+TEST(Rans, ChangingTurbulenceConditionsChangesTheFlow) {
+  FreestreamConditions conditions;
+  conditions.speed = 1.0;
+  conditions.density = 1.0;
+  conditions.reynoldsNumber = 1.0e6;
+  conditions.angleOfAttackDeg = 0.0;
+
+  TurbulenceInflow quiet;
+  quiet.intensity = 0.0005;
+  quiet.viscosityRatio = 0.1;
+
+  TurbulenceInflow rough;
+  rough.intensity = 0.05;
+  rough.viscosityRatio = 100.0;
+
+  const auto calm = solveSection("0012", conditions, quiet, 600);
+  const auto stormy = solveSection("0012", conditions, rough, 600);
+
+  // More freestream turbulence means more mixing, a fuller boundary layer and
+  // more skin friction. The direction is what matters; the magnitude depends on
+  // the mesh.
+  EXPECT_GT(stormy.frictionDragCoefficient, calm.frictionDragCoefficient)
+      << "freestream turbulence is not reaching the solution";
+  EXPECT_GT(std::abs(stormy.dragCoefficient - calm.dragCoefficient) /
+                calm.dragCoefficient,
+            0.01)
+      << "a hundredfold change in freestream turbulence moved the drag by under 1%";
+}
+
+// The length scale and the viscosity ratio are two ways of stating the same
+// thing, and both must reach omega.
+TEST(Rans, TheTurbulenceLengthScaleSetsTheFreestreamDissipation) {
+  const Mesh& mesh = sharedMesh();
+  const FreestreamConditions conditions = stream();
+  const FlowField field = uniform(mesh, conditions);
+
+  TurbulenceInflow byLength;
+  byLength.intensity = 0.02;
+  byLength.lengthScale = 0.01;
+
+  KOmegaSST model;
+  ASSERT_TRUE(model.initialise(mesh, faces(mesh, conditions), field, byLength));
+
+  // omega = sqrt(k) / (beta*^(1/4) L)
+  const SSTConstants c;
+  const double expected =
+      std::sqrt(model.freestreamEnergy()) / (std::pow(c.betaStar, 0.25) * byLength.lengthScale);
+  EXPECT_NEAR(expected, model.freestreamDissipation(), 1e-9 * expected);
+
+  // And a shorter length scale means faster dissipation.
+  TurbulenceInflow shorter = byLength;
+  shorter.lengthScale = 0.001;
+  KOmegaSST tighter;
+  ASSERT_TRUE(tighter.initialise(mesh, faces(mesh, conditions), field, shorter));
+  EXPECT_GT(tighter.freestreamDissipation(), model.freestreamDissipation());
+}
+
+// Stating a viscosity directly inverts the usual relationship: mu is given and
+// the Reynolds number follows.
+TEST(Rans, AStatedViscosityOverridesTheReynoldsNumber) {
+  FreestreamConditions conditions;
+  conditions.speed = 10.0;
+  conditions.density = 2.0;
+  conditions.reynoldsNumber = 1.0e6;
+
+  // Without an override, mu follows from Re.
+  EXPECT_NEAR(2.0 * 10.0 * 1.0 / 1.0e6, conditions.dynamicViscosity(1.0), 1e-15);
+  EXPECT_NEAR(1.0e6, conditions.effectiveReynolds(1.0), 1e-6);
+
+  // With one, mu is taken as given and Re follows from it.
+  conditions.dynamicViscosityOverride = 1.0e-3;
+  EXPECT_DOUBLE_EQ(1.0e-3, conditions.dynamicViscosity(1.0));
+  EXPECT_NEAR(2.0 * 10.0 * 1.0 / 1.0e-3, conditions.effectiveReynolds(1.0), 1e-6);
 }
 
 }  // namespace

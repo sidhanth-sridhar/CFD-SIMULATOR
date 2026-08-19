@@ -492,6 +492,23 @@ Status Application::initialize(const ApplicationOptions& options) {
     impl_->ui.solving.dirty = true;
   }
 
+  if (options.turbulenceIntensity > 0.0) {
+    impl_->ui.solving.settings.inflow.intensity = options.turbulenceIntensity;
+    impl_->ui.solving.dirty = true;
+  }
+  if (options.turbulenceViscosityRatio > 0.0) {
+    impl_->ui.solving.settings.inflow.viscosityRatio = options.turbulenceViscosityRatio;
+    impl_->ui.solving.dirty = true;
+  }
+  if (options.turbulenceLengthScale > 0.0) {
+    impl_->ui.solving.settings.inflow.lengthScale = options.turbulenceLengthScale;
+    impl_->ui.solving.dirty = true;
+  }
+  if (options.dynamicViscosity > 0.0) {
+    impl_->ui.flow.freestream.dynamicViscosityOverride = options.dynamicViscosity;
+    impl_->ui.flow.dirty = true;
+  }
+
   if (options.firstLayerHeight > 0.0) {
     impl_->ui.meshing.firstLayerHeight = options.firstLayerHeight;
     impl_->ui.meshing.dirty = true;
@@ -541,6 +558,16 @@ Status Application::initialize(const ApplicationOptions& options) {
       impl_->ui.flow.view = FieldView::VelocityY;
     } else if (view == "pressure") {
       impl_->ui.flow.view = FieldView::Pressure;
+    } else if (view == "cp") {
+      impl_->ui.flow.view = FieldView::PressureCoefficient;
+    } else if (view == "vorticity") {
+      impl_->ui.flow.view = FieldView::Vorticity;
+    } else if (view == "k") {
+      impl_->ui.flow.view = FieldView::TurbulentEnergy;
+    } else if (view == "omega") {
+      impl_->ui.flow.view = FieldView::SpecificDissipation;
+    } else if (view == "mut" || view == "nut") {
+      impl_->ui.flow.view = FieldView::EddyViscosityRatio;
     } else if (view == "divergence") {
       impl_->ui.flow.view = FieldView::Divergence;
     } else {

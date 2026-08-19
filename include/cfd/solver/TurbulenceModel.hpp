@@ -84,6 +84,19 @@ struct TurbulenceInflow {
   /// a small value is that the freestream should not be doing the mixing.
   double viscosityRatio{1.0};
 
+  /// Turbulent length scale in metres, or zero to use the ratio instead.
+  ///
+  /// Two ways of saying the same thing, and which is natural depends on where
+  /// the turbulence came from. Downstream of a grid or a screen the eddy size
+  /// is the physical quantity someone knows, and omega follows from
+  ///
+  ///     omega = sqrt(k) / (beta*^(1/4) L)
+  ///
+  /// For an aerofoil in a clean tunnel there is no such length, and a small
+  /// eddy-viscosity ratio is the honest way to say "the freestream is not doing
+  /// the mixing". A positive value here selects the length-scale form.
+  double lengthScale{0.0};
+
   [[nodiscard]] Status validate() const;
 };
 
@@ -172,6 +185,17 @@ class TurbulenceModel {
   /// Ranges of the model's own variables. Default is all zeros, which is the
   /// truthful answer for a closure that has none.
   [[nodiscard]] virtual TurbulenceRanges ranges() const noexcept { return {}; }
+
+  /// The model's own transported quantities, per cell, for display. Empty when
+  /// a model has none - which is the honest answer for a laminar closure, and
+  /// lets the viewport grey the corresponding views out rather than showing
+  /// zeros that look like data.
+  [[nodiscard]] virtual const std::vector<double>* turbulentEnergyField() const noexcept {
+    return nullptr;
+  }
+  [[nodiscard]] virtual const std::vector<double>* dissipationField() const noexcept {
+    return nullptr;
+  }
 
   /// Largest y+ over the wall faces, or 0 if the model does not track it.
   ///

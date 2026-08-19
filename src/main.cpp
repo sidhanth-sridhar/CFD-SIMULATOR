@@ -44,6 +44,10 @@ struct Options {
   long long solverMaxIterations{0};
   std::string turbulenceModel;
   std::string convectionScheme;
+  double turbulenceIntensity{0.0};
+  double turbulenceViscosityRatio{0.0};
+  double turbulenceLengthScale{0.0};
+  double dynamicViscosity{0.0};
   double firstLayerHeight{0.0};
   double farFieldChords{0.0};
   double wakeChords{0.0};
@@ -79,14 +83,18 @@ void printUsage() {
       "      --max-iterations N  Outer-iteration ceiling for each solve\n"
       "      --turbulence NAME   Closure: laminar (default) or sst\n"
       "      --scheme NAME       Convection: upwind (default) or second\n"
+      "      --intensity I       Freestream turbulence intensity, u'/U\n"
+      "      --eddy-ratio R      Freestream mu_t/mu\n"
+      "      --length-scale L    Turbulent length scale in metres (instead of R)\n"
+      "      --viscosity MU      Dynamic viscosity in Pa.s; Reynolds then follows\n"
       "      --first-layer H     First cell height off the wall, in chords\n"
       "      --far-field N       Upstream and vertical extent, in chords\n"
       "      --wake N            Downstream extent, in chords\n"
       "      --polar A:B:S       Sweep incidence from A to B in steps of S degrees,\n"
       "                          write the polar and exit (implies --flow)\n"
       "      --polar-csv FILE    Where the sweep writes its CSV\n"
-      "      --field NAME        Shown scalar: velocity, vx, vy, pressure\n"
-      "                          or divergence\n"
+      "      --field NAME        Shown scalar: velocity, vx, vy, pressure, cp,\n"
+      "                          vorticity, k, omega, mut or divergence\n"
       "      --frame-stats N     Log a frame-time summary every N frames\n"
       "      --max-frames N      Stop after N frames (for timing runs)\n"
       "      --self-check        Run headless startup checks and exit\n"
@@ -144,6 +152,28 @@ cfd::Result<Options> parseArguments(std::span<const std::string_view> args) {
       }
       ++i;
       options.turbulenceModel = std::string{args[i]};
+    } else if (arg == "--intensity" || arg == "--eddy-ratio" ||
+               arg == "--length-scale" || arg == "--viscosity") {
+      const std::string_view which = arg;
+      if (i + 1 >= args.size()) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          std::string{which} + " requires a value"};
+      }
+      ++i;
+      const double value = std::strtod(std::string{args[i]}.c_str(), nullptr);
+      if (!(value > 0.0)) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          std::string{which} + " must be a positive number"};
+      }
+      if (which == "--intensity") {
+        options.turbulenceIntensity = value;
+      } else if (which == "--eddy-ratio") {
+        options.turbulenceViscosityRatio = value;
+      } else if (which == "--length-scale") {
+        options.turbulenceLengthScale = value;
+      } else {
+        options.dynamicViscosity = value;
+      }
     } else if (arg == "--scheme") {
       if (i + 1 >= args.size()) {
         return cfd::Error{cfd::ErrorCode::InvalidArgument,
@@ -400,6 +430,10 @@ int main(int argc, char** argv) {
     appOptions.maxIterations = options.solverMaxIterations;
     appOptions.turbulenceModel = options.turbulenceModel;
     appOptions.convectionScheme = options.convectionScheme;
+    appOptions.turbulenceIntensity = options.turbulenceIntensity;
+    appOptions.turbulenceViscosityRatio = options.turbulenceViscosityRatio;
+    appOptions.turbulenceLengthScale = options.turbulenceLengthScale;
+    appOptions.dynamicViscosity = options.dynamicViscosity;
     appOptions.firstLayerHeight = options.firstLayerHeight;
     appOptions.farFieldChords = options.farFieldChords;
     appOptions.wakeChords = options.wakeChords;

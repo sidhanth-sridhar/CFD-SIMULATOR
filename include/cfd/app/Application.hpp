@@ -77,6 +77,13 @@ struct ApplicationOptions {
   /// Convection scheme: "upwind" or "second". Empty keeps the default.
   std::string convectionScheme{};
 
+  /// Freestream turbulence. Zero leaves each at its default.
+  double turbulenceIntensity{0.0};
+  double turbulenceViscosityRatio{0.0};
+  double turbulenceLengthScale{0.0};
+  /// Dynamic viscosity in Pa.s. Positive makes Reynolds the derived quantity.
+  double dynamicViscosity{0.0};
+
   /// First cell height off the wall, as a fraction of chord. Zero keeps the
   /// resolution preset's value. A low-Reynolds wall treatment needs y+ of order
   /// one, which at Re = 10^6 means around 2.5e-5 - far finer than any preset.

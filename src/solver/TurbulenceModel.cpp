@@ -17,6 +17,11 @@ Status TurbulenceInflow::validate() const {
                  std::format("the eddy viscosity ratio must be positive, got {}",
                              viscosityRatio)};
   }
+  if (!std::isfinite(lengthScale) || lengthScale < 0.0) {
+    return Error{ErrorCode::InvalidArgument,
+                 std::format("the turbulence length scale must not be negative, got {}",
+                             lengthScale)};
+  }
   return Status::ok();
 }
 

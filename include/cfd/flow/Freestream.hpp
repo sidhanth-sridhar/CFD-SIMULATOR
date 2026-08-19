@@ -56,6 +56,15 @@ struct FreestreamConditions {
   /// eventually be compared against.
   double reynoldsNumber{1.0e6};
 
+  /// Dynamic viscosity in Pa.s, or zero to derive it from the Reynolds number.
+  ///
+  /// The Reynolds number is the natural input for aerofoil work - see the note
+  /// at the top of this file - but it is not the only way anyone states a
+  /// problem. Someone modelling a specific fluid at a specific speed knows mu
+  /// and wants Re to follow. Setting this positive inverts the relationship:
+  /// mu is taken as given and reynoldsNumber becomes the derived quantity.
+  double dynamicViscosityOverride{0.0};
+
   /// Freestream velocity vector, U * (cos alpha, sin alpha).
   [[nodiscard]] Vec2 velocity() const noexcept;
 
@@ -72,6 +81,10 @@ struct FreestreamConditions {
   /// Dynamic viscosity implied by the Reynolds number at this chord,
   /// mu = rho * U * c / Re, in Pa.s.
   [[nodiscard]] double dynamicViscosity(double chord) const noexcept;
+
+  /// Reynolds number actually in force: the stated one, or the one implied by
+  /// an overriding viscosity.
+  [[nodiscard]] double effectiveReynolds(double chord) const noexcept;
 
   /// Kinematic viscosity nu = mu / rho, m^2/s.
   [[nodiscard]] double kinematicViscosity(double chord) const noexcept;

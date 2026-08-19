@@ -79,6 +79,12 @@ struct SolverUpdate {
   /// whether the model is doing anything at all.
   double maxEddyViscosityRatio{0.0};
   double wallYPlus{0.0};
+
+  /// The model's own fields, so the viewport can shade by them. Empty without a
+  /// model, which is what tells the UI those views have nothing behind them.
+  std::vector<double> turbulentEnergy;
+  std::vector<double> dissipation;
+  std::vector<double> eddyViscosity;
 };
 
 /// Drives a SimpleSolver on a background thread.

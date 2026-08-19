@@ -195,6 +195,12 @@ class KOmegaSST final : public TurbulenceModel {
 
   [[nodiscard]] double maxWallYPlus() const noexcept override { return maxYPlus_; }
   [[nodiscard]] TurbulenceRanges ranges() const noexcept override { return ranges_; }
+  [[nodiscard]] const std::vector<double>* turbulentEnergyField() const noexcept override {
+    return &k_;
+  }
+  [[nodiscard]] const std::vector<double>* dissipationField() const noexcept override {
+    return &omega_;
+  }
 
   // --- inspection, for tests and for the panel ---
   [[nodiscard]] const std::vector<double>& turbulentEnergy() const noexcept { return k_; }
