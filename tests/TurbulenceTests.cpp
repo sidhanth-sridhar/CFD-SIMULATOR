@@ -240,10 +240,24 @@ TEST(Turbulence, FreestreamValuesFollowFromIntensityAndViscosityRatio) {
   EXPECT_NEAR(field.density[0] * model.freestreamEnergy() / (5.0 * mu),
               model.freestreamDissipation(), 1e-9 * model.freestreamDissipation());
 
-  // And the eddy viscosity it starts from is that multiple.
-  for (const double mut : model.eddyViscosity()) {
-    EXPECT_NEAR(5.0 * mu, mut, 1e-12);
+  // Out in the freestream the eddy viscosity starts at that multiple. Near a
+  // wall it does not, and should not: omega is seeded from the analytic
+  // sublayer solution there, which is orders of magnitude larger than the
+  // freestream value, so mu_t = rho k / omega starts correspondingly smaller.
+  // Starting it uniform is what used to blow the solve up in its first hundred
+  // iterations.
+  const std::vector<double>& distance = model.wallDistance();
+  std::size_t freestreamCells = 0;
+  for (std::size_t c = 0; c < model.eddyViscosity().size(); ++c) {
+    if (distance[c] > 1.0) {
+      EXPECT_NEAR(5.0 * mu, model.eddyViscosity()[c], 1e-12 * mu) << "cell " << c;
+      ++freestreamCells;
+    } else {
+      EXPECT_LE(model.eddyViscosity()[c], 5.0 * mu * (1.0 + 1e-12)) << "cell " << c;
+      EXPECT_GT(model.eddyViscosity()[c], 0.0) << "cell " << c;
+    }
   }
+  EXPECT_GT(freestreamCells, 100u);
 }
 
 // Away from a wall and at low strain the limiter is inactive, and the model
@@ -295,10 +309,20 @@ TEST(Turbulence, TheWallValueOfOmegaFollowsTheSublayerSolution) {
     const auto owner = static_cast<std::size_t>(mesh.faces()[f].owner);
     const double nu = field.viscosity[owner] / field.density[owner];
     const double d = distance[owner];
-    const double expected = 60.0 * nu / (constants.beta1 * d * d);
+    // The viscous-sublayer asymptote blended with the log-layer form. The
+    // coefficient is 6: the 60 in Menter's paper belongs at the wall *face*,
+    // not in the first cell.
+    const double viscous = 6.0 * nu / (constants.beta1 * d * d);
+    const double logarithmic = std::sqrt(std::max(model->turbulentEnergy()[owner], 0.0)) /
+                               (std::pow(constants.betaStar, 0.25) * constants.kappa * d);
+    const double expected = std::sqrt(viscous * viscous + logarithmic * logarithmic);
     EXPECT_NEAR(expected, omega[owner], 1e-6 * expected) << "wall face " << f;
-    // And k vanishes there, because the fluctuations vanish with the velocity.
-    EXPECT_DOUBLE_EQ(0.0, model->turbulentEnergy()[owner]);
+    // k is solved in the first cell, not imposed: the fluctuations vanish *at
+    // the wall*, which is a condition on the face, not on the cell one layer
+    // out into the fluid. All that can be said after a single iteration is that
+    // it is a physical number; what it converges to is checked below.
+    EXPECT_GE(model->turbulentEnergy()[owner], 0.0);
+    EXPECT_TRUE(std::isfinite(model->turbulentEnergy()[owner]));
     ++checked;
   }
   EXPECT_GT(checked, 10u);
@@ -377,6 +401,19 @@ TEST(Turbulence, TheModelProducesBoundedPositiveEddyViscosity) {
   const auto monitor = created.value().iterate();
   EXPECT_GT(monitor.maxEddyViscosityRatio, 1.0)
       << "the model is attached but not producing any turbulent mixing";
+
+  // A boundary layer is far *more* turbulent than the stream it grew out of -
+  // that is what a boundary layer is. Freestream k here is 1.5(0.001 U)^2,
+  // while the near-wall value is orders of magnitude above it.
+  double nearWallPeak = 0.0;
+  const std::vector<double>& distance = model->wallDistance();
+  for (std::size_t c = 0; c < distance.size(); ++c) {
+    if (distance[c] < 0.01) {
+      nearWallPeak = std::max(nearWallPeak, model->turbulentEnergy()[c]);
+    }
+  }
+  EXPECT_GT(nearWallPeak, 10.0 * model->freestreamEnergy())
+      << "the boundary layer is no more turbulent than the freestream";
 }
 
 // The production limiter exists to stop a stagnation point - high strain, no

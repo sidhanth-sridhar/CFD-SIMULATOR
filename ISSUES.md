@@ -47,6 +47,27 @@ three presets that differ in more than one way at once.
 
 ---
 
+### #58 — A turbulent solve can diverge in its first hundred iterations
+**Severity:** degraded · **Found:** Phase 8 · **Area:** solver
+
+Starting k-omega SST from a uniform field on the medium C-grid at Re = 10⁶
+diverged at iteration 74. The cold retry added in Phase 7 (#54) recovered it and
+the run then converged normally, so the answer is not affected — but relying on
+a retry to get past the first hundred iterations is not a fix.
+
+**Cause.** k and omega are initialised to their freestream values *everywhere*,
+including inside the boundary layer where omega should be five or six orders of
+magnitude larger. The first iterations therefore see an enormous wall strain
+rate against a tiny omega, the production term is huge, and k runs away before
+the wall treatment has had a chance to impose the sublayer value.
+
+**Fix direction.** Seed omega from the wall distance at `initialise` rather than
+waiting for the first `update` to apply the wall condition — the analytic
+sublayer value 60ν/(β₁d²) is already known there, and starting from it removes
+the transient entirely.
+
+---
+
 ## Limitations
 
 Not defects. Listed so they are not mistaken for any.

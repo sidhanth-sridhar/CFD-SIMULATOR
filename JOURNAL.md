@@ -3225,3 +3225,133 @@ field.
   already on the shelf.
 
 **Next:** Reynolds averaging and a turbulence model, on explicit instruction.
+
+---
+
+# Phase 8 — Reynolds Averaging and a Turbulence Model
+
+**Completed:** 2026-08-18
+**Outcome:** 265/265 tests pass. A `TurbulenceModel` interface the solver depends
+on in place of any particular closure, k-omega SST behind it, and NACA 0012
+running at Re = 10^6 with y+ of order one.
+
+## 1. Scope
+
+Everything in this project so far has been at Re = 500 - three orders of
+magnitude below where aerofoils actually operate - because no *steady laminar*
+solution exists up there. This phase is what makes the rest of it mean
+something: Reynolds averaging, a closure for the term averaging leaves behind,
+and the first comparison against data from outside this repository.
+
+## 2. Where the closure problem comes from
+
+Turbulent flow is unsteady and three-dimensional at every scale, and resolving
+all of it is out of reach. So the equations are averaged: every quantity is
+split into a mean and a fluctuation, $u = U + u'$, and the equations are
+averaged over the fluctuations.
+
+Almost every term survives unchanged, because averaging is linear and most terms
+are linear in $u$. The exception is convection, which is quadratic:
+
+$$\overline{\nabla \cdot (\rho\,\mathbf{u}\mathbf{u})}
+= \nabla \cdot (\rho\,\mathbf{U}\mathbf{U}) + \nabla \cdot (\rho\,\overline{\mathbf{u}'\mathbf{u}'})$$
+
+- The first term is what the laminar solver already assembles.
+- The second is new. The mean momentum is being transported by the
+  fluctuations, and it acts on the mean flow exactly as an extra stress would.
+
+Those are the **Reynolds stresses**, and the whole difficulty is that nothing
+determines them:
+
+$$\nabla \cdot (\rho\,\mathbf{U}\mathbf{U}) = -\nabla P + \nabla \cdot (\mu \nabla \mathbf{U})
+- \nabla \cdot (\rho\,\overline{\mathbf{u}'\mathbf{u}'})$$
+
+Averaging produced new unknowns and no new equations. Deriving a transport
+equation for $\overline{u'u'}$ introduces triple correlations
+$\overline{u'u'u'}$, and so on without end. **The averaged equations are not a
+closed system, and no manipulation makes them one.** A turbulence model is a
+*guess* at the Reynolds stresses in terms of quantities the mean flow already
+has - which is why there are dozens of them, why none is universally right, and
+why choosing one is a modelling decision rather than a numerical one.
+
+### The eddy-viscosity idea
+
+The usual guess is Boussinesq's: that turbulence mixes momentum the way
+molecular motion does, only far more strongly, so the Reynolds stresses can be
+written like a viscous stress with a larger coefficient:
+
+$$-\rho\,\overline{\mathbf{u}'\mathbf{u}'} = \mu_t\left(\nabla \mathbf{U} + \nabla \mathbf{U}^T\right) - \tfrac{2}{3}\rho k \mathbf{I}$$
+
+with $\mu_t$ the **eddy viscosity** - a property of the flow, not of the fluid,
+varying by orders of magnitude across a boundary layer. A model of this family
+does one thing: compute $\mu_t$.
+
+That is the entire reason this phase required no changes to the momentum
+assembly. It already read a per-cell effective viscosity, so the coupling
+between a turbulence model and the rest of the solver is one line:
+
+```cpp
+field_.viscosity[c] = molecularViscosity_[c] + eddy[c];
+```
+
+## 3. The interface, and what it deliberately does not know
+
+`TurbulenceModel` mentions neither k, nor omega, nor epsilon. A model owns
+whatever transport equations it needs and exposes only an eddy viscosity, its
+own residuals, and the y+ it achieved. Swapping SST for Spalart-Allmaras or a
+mixing length has to be possible without the solver noticing.
+
+The sharpest test of that is a control rather than an assertion. `LaminarModel`
+is a closure that supplies *nothing* - "the flow is laminar" is a perfectly good
+model - and solving with it attached must be **bit-identical** to solving with
+no model at all. If those ever diverge, the solver has grown a dependency on
+whether a model is present rather than on what one returns.
+
+## 4. k-omega SST, and why it is two models
+
+The k-omega model of Wilcox behaves beautifully near a wall - it integrates
+straight through the viscous sublayer with no damping functions - and badly in
+the freestream, where the answer depends alarmingly on the omega specified at
+the inlet. k-epsilon is the other way round.
+
+Menter's insight was that you need not choose. Rewritten in terms of omega,
+k-epsilon differs from k-omega by exactly one term - **cross-diffusion** - so
+the two blend by switching that term on and off along with the constants. A
+blending function $F_1$ is built to be 1 inside the boundary layer and 0 outside,
+from quantities that measure wall distance in turbulence units.
+
+The second idea is the one the model is named for. Eddy-viscosity models
+over-predict $\mu_t$ under an adverse pressure gradient, which makes boundary
+layers far too reluctant to separate - the single most damaging error for
+aerofoil work. Bradshaw observed that in a boundary layer the shear stress is
+close to a constant times k; imposing that as a *limit*,
+
+$$\mu_t = \frac{\rho\, a_1 k}{\max(a_1 \omega,\; S F_2)}$$
+
+caps $\mu_t$ exactly where the strain rate is high. That is "shear stress
+transport".
+
+### Decisions worth recording
+
+**First-order upwind for k and omega, deliberately.** The turbulence equations
+are far stiffer than the momentum ones, and boundedness matters more than
+accuracy here: an overshoot that drives k negative is not a small error, it is a
+quantity that has stopped meaning anything.
+
+**Production is explicit, destruction implicit.** A larger phi makes its own
+sink larger and the diagonal grows with it, which is what keeps a strictly
+positive quantity positive under a discretisation that does not otherwise
+guarantee it.
+
+**The omega production term is rewritten to avoid dividing by $\mu_t$.** The
+textbook form is $(\gamma \rho / \mu_t) P_k$; substituting $P_k = \mu_t S^2$
+gives $\gamma \rho S^2$, which is both cheaper and safe where $\mu_t$ vanishes.
+
+**omega at a wall is set, not extrapolated.** It is singular there, so there is
+nothing to extrapolate; the first cell takes the analytic sublayer value
+$\omega = 60\nu/(\beta_1 d^2)$ outright.
+
+**y+ is reported, not just used.** A low-Reynolds wall treatment is only valid
+while the first cell sits inside the viscous sublayer. A model being used
+outside its range of validity should be able to say so rather than quietly
+producing numbers.

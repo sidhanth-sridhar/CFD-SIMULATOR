@@ -2437,6 +2437,27 @@ void drawSolverPanel(UiState& ui) {
     ImGui::PopStyleColor();
   }
 
+  // Whether the model is doing anything, and whether the mesh is fine enough
+  // for its wall treatment to be valid. Both are reported rather than assumed:
+  // mu_t/mu of order one means the closure is attached but idle, and y+ well
+  // above one means the low-Reynolds wall treatment is outside its range.
+  if (state.turbulence != TurbulenceChoice::Laminar && state.iteration > 0) {
+    ImGui::Spacing();
+    if (beginInfoTable("solver_turbulence", 104.0f)) {
+      infoRow(ui, "mu_t/mu", std::format("up to {:.4g}", state.eddyViscosityRatio));
+      infoRow(ui, "y+", std::format("up to {:.3g}", state.wallYPlus));
+      ImGui::EndTable();
+    }
+    if (state.wallYPlus > 5.0) {
+      ImGui::PushStyleColor(ImGuiCol_Text, theme::kLevelWarning);
+      ImGui::TextWrapped(
+          "y+ is above 5, so the first cell is outside the viscous sublayer and "
+          "the low-Reynolds wall treatment is being used outside its range. "
+          "Reduce the first layer height.");
+      ImGui::PopStyleColor();
+    }
+  }
+
   // --- progress ---
   ImGui::Spacing();
   ImGui::SeparatorText("Residuals");
@@ -2490,6 +2511,32 @@ void drawSolverPanel(UiState& ui) {
     };
     relaxRow("Relax u", "##relaxu", &state.settings.velocityRelaxation);
     relaxRow("Relax p", "##relaxp", &state.settings.pressureRelaxation);
+
+    // The closure. Changing it rebuilds the solver, the same as changing the
+    // mesh would - a turbulence model is not a display setting.
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::TextColored(theme::kTextDim, "Turbulence");
+    ImGui::TableSetColumnIndex(1);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::BeginCombo("##turbulence",
+                          std::string{toString(state.turbulence)}.c_str())) {
+      for (const TurbulenceChoice choice :
+           {TurbulenceChoice::Laminar, TurbulenceChoice::KOmegaSST}) {
+        const bool selected = state.turbulence == choice;
+        if (ImGui::Selectable(std::string{toString(choice)}.c_str(), selected)) {
+          state.turbulence = choice;
+          state.dirty = true;
+        }
+        if (selected) {
+          ImGui::SetItemDefaultFocus();
+        }
+      }
+      ImGui::EndCombo();
+    }
+    if (state.turbulence == TurbulenceChoice::KOmegaSST) {
+      relaxRow("Relax k/w", "##relaxt", &state.settings.turbulenceRelaxation);
+    }
 
     ImGui::TableNextRow();
     ImGui::TableSetColumnIndex(0);

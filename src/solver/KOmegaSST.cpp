@@ -67,6 +67,30 @@ void interpolate(const mesh::Mesh& mesh, const flow::FaceConditions& conditions,
   }
 }
 
+/// Specific dissipation in the cell next to a wall.
+///
+/// omega is singular at a wall, so it is not extrapolated: the near-wall cell is
+/// set from the analytic behaviour. Two limits matter and the standard
+/// cell-centred treatment blends them smoothly:
+///
+///   viscous sublayer   omega -> 6 nu / (beta1 d^2)
+///   logarithmic layer  omega -> sqrt(k) / (beta*^(1/4) kappa d)
+///
+/// The factor is **6**, not 60. Menter's widely quoted 60 nu/(beta1 d^2) is the
+/// value imposed at the *wall face* - deliberately over-large, as a robust
+/// Dirichlet condition on a boundary where omega is infinite. Putting it in the
+/// cell instead makes 500 nu/(d^2 omega) collapse to the constant 500 beta1/60 =
+/// 0.625, which drags the blending function F1 down to tanh(0.625^4) = 0.15 in
+/// the sublayer - where it should be 1. The model then runs its k-epsilon branch
+/// against the wall, which is exactly what SST exists to avoid.
+double wallOmega(double nu, double distance, double energy, const SSTConstants& c) {
+  const double d = std::max(distance, kTiny);
+  const double viscous = 6.0 * nu / (c.beta1 * d * d);
+  const double logarithmic =
+      std::sqrt(std::max(energy, 0.0)) / (std::pow(c.betaStar, 0.25) * c.kappa * d);
+  return std::sqrt(viscous * viscous + logarithmic * logarithmic);
+}
+
 }  // namespace
 
 double SSTConstants::gamma1() const noexcept {
@@ -126,6 +150,28 @@ Status KOmegaSST::initialise(const mesh::Mesh& mesh, const flow::FaceConditions&
   k_.assign(cells, kInflow_);
   omega_.assign(cells, omegaInflow_);
   eddyViscosity_.assign(cells, eddyViscosity);
+
+  // Seed omega from the wall distance rather than leaving it at its freestream
+  // value everywhere.
+  //
+  // Inside a boundary layer omega is five or six orders of magnitude larger than
+  // in the freestream. Starting it uniform means the first iterations see an
+  // enormous wall strain rate against a tiny omega, so the production term is
+  // huge and k runs away before the wall condition has been applied even once.
+  // At Re = 10^6 that reliably blew the solve up inside a hundred iterations.
+  //
+  // The analytic sublayer solution is already known here, and away from the wall
+  // it decays below the freestream value, so taking the larger of the two gives
+  // a starting field that is right where it matters and unchanged where it does
+  // not.
+  for (std::size_t c = 0; c < cells; ++c) {
+    const double d = std::max(wallDistance_[c], kTiny);
+    const double nu = field.viscosity[c] / std::max(field.density[c], kTiny);
+    omega_[c] = std::max(omegaInflow_, wallOmega(nu, d, k_[c], constants_));
+    // mu_t = rho k / omega follows, so the eddy viscosity starts small inside
+    // the boundary layer rather than at the freestream ratio.
+    eddyViscosity_[c] = field.density[c] * k_[c] / omega_[c];
+  }
 
   strain_.assign(cells, 0.0);
   f1_.assign(cells, 0.0);
@@ -248,14 +294,17 @@ void KOmegaSST::applyWallConditions(const TurbulenceContext& context) {
     const double rho = std::max(field.density[owner], kTiny);
     const double nu = mu[owner] / rho;
 
-    // Menter's low-Reynolds wall value. Integrating the omega equation through
-    // the viscous sublayer gives an analytic near-wall solution, and this is it
-    // evaluated at the first cell centre. It is a *fixed value*, not a
-    // gradient: omega is singular at a wall, so there is nothing to extrapolate
-    // and the first cell is set outright.
-    omega_[owner] = 60.0 * nu / (constants_.beta1 * d * d);
-    // No turbulent energy at a wall: the fluctuations vanish with the velocity.
-    k_[owner] = 0.0;
+    // Set outright rather than extrapolated: see wallOmega above for why the
+    // coefficient is 6 and not the 60 that appears in the boundary condition.
+    omega_[owner] = wallOmega(nu, d, k_[owner], constants_);
+
+    // k is *not* forced to zero here. The fluctuations do vanish at the wall,
+    // and that is imposed where it belongs - as a Dirichlet value on the wall
+    // face, which the transport equation already applies. Overwriting the cell
+    // as well would impose the wall value one cell out into the fluid, killing
+    // the turbulence in the very cell whose k the wall treatment above depends
+    // on. At y+ of order one the solved cell value is small, which is the
+    // physically right answer rather than an imposed one.
 
     // y+ = u_tau d / nu, with u_tau from the wall shear the mean field implies.
     // Reported rather than used: the wall treatment above is only valid while

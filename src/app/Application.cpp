@@ -497,6 +497,16 @@ Status Application::initialize(const ApplicationOptions& options) {
     impl_->ui.meshing.dirty = true;
   }
 
+  if (options.farFieldChords > 0.0) {
+    impl_->ui.meshing.upstreamChords = options.farFieldChords;
+    impl_->ui.meshing.verticalChords = options.farFieldChords;
+    impl_->ui.meshing.dirty = true;
+  }
+  if (options.wakeChords > 0.0) {
+    impl_->ui.meshing.downstreamChords = options.wakeChords;
+    impl_->ui.meshing.dirty = true;
+  }
+
   if (options.maxIterations > 0) {
     impl_->ui.solving.maxIterations = options.maxIterations;
   }

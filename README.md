@@ -3,8 +3,8 @@
 A 2D Reynolds-Averaged Navier-Stokes solver for NACA airfoil sections, with an
 interactive viewer.
 
-**Status: Phase 7 — automated angle-of-attack sweeps producing aerodynamic
-polars. Laminar; no turbulence model yet.**
+**Status: Phase 8 — Reynolds-averaged with a k-omega SST closure, running at
+Re = 10⁶ and validated against published values.**
 
 The application generates NACA four-digit sections, builds a structured C-grid
 around them, solves the steady incompressible Navier-Stokes equations on them
@@ -465,6 +465,48 @@ Continuation is what makes this practical: the first point needs 5,000
 iterations — it is the zero-incidence case that does not converge — and every
 point after the second settles in 760 to 930.
 
+### Turbulence
+
+Everything up to Phase 7 was laminar, which meant every result sat at Re = 500 —
+three orders of magnitude below where aerofoils operate — because no *steady
+laminar* solution exists up there. The solver is now Reynolds-averaged.
+
+**The closure problem.** Averaging the Navier-Stokes equations is linear in
+every term but convection, which is quadratic. Averaging it leaves an extra
+piece, ∇·(ρ⟨**u'u'**⟩) — the **Reynolds stresses** — and nothing determines
+them. Deriving a transport equation for ⟨u'u'⟩ introduces ⟨u'u'u'⟩, and so on
+without end. The averaged equations are not a closed system, and no manipulation
+makes them one. A turbulence model is a *guess* at those stresses in terms of
+quantities the mean flow already has.
+
+**The interface.** `TurbulenceModel` mentions neither k, ω nor ε: a model owns
+whatever equations it needs and exposes only an eddy viscosity, its own
+residuals, and the y+ it achieved. The coupling to the rest of the solver is one
+line — `field_.viscosity[c] = molecular[c] + eddy[c]` — because the momentum
+assembly already read a per-cell effective viscosity. Nothing in it was changed
+for this phase.
+
+`LaminarModel` is the control: a closure that supplies nothing. Solving with it
+attached is **bit-identical** to solving with no model at all, which is the test
+that the solver depends on the abstraction rather than on which model is
+present.
+
+**k-ω SST** is the first concrete model — the 2003 form with standard constants,
+F1/F2 blending, cross-diffusion, the shear-stress limiter, the production
+limiter, and Menter's low-Reynolds wall treatment (ω = 60ν/β₁d² imposed at the
+first cell). There is no wall function, so it needs y+ of order 1; the model
+reports the y+ it achieved so that being used outside its range is visible
+rather than silent.
+
+```sh
+cfd_sim --section "NACA 0012" --mesh fine --reynolds 1e6 \
+        --turbulence sst --first-layer 2.5e-5 --polar 0:18:2
+```
+
+`--first-layer` matters: y+ ≈ 1 at Re = 10⁶ needs about 2.5×10⁻⁵ chords, far
+finer than any resolution preset. At that setting the runs below achieved
+y+ = 1.2–1.3 and μ_t/μ up to ~140.
+
 ### Viewport controls
 
 | Input | Action |
@@ -766,6 +808,65 @@ of 9.968×10⁻⁷ with separation at x/c = 0.6923.
 The panel reports whether the field image was redrawn or reused, because a
 cached image that is silently wrong and one that is correctly cached look
 identical.
+
+### Grid convergence and external validation
+
+This is the project's first comparison against values from outside the
+repository, and the first proper grid-convergence study. Both come from the same
+runs: NACA 0012, α = 4°, Re = 10⁶, k-ω SST, on three grids refining by a factor
+of about 1.87 in each direction. The first-layer height is held fixed at
+2.5×10⁻⁵ c across all three deliberately — y+ must stay of order 1 for the wall
+treatment, so only the surface, wake and normal point counts refine.
+
+| Quantity | Coarse (8,658) | Medium (30,530) | Fine (105,410) | Observed order | Richardson extrapolation |
+|---|---|---|---|---|---|
+| C<sub>l</sub> | 0.3594 | 0.3870 | 0.4041 | 0.77 | **0.4317** |
+| C<sub>d</sub> | 0.0358 | 0.0252 | 0.0191 | 0.86 | **0.0104** |
+| C<sub>d</sub> pressure | 0.0289 | 0.0178 | 0.0113 | 0.84 | **0.0018** |
+| C<sub>d</sub> friction | 0.0069 | 0.0074 | 0.0078 | 0.50 | **0.0088** |
+
+**The observed order is ~0.8**, which is first order. That is exactly what the
+first-order upwind convection scheme predicts, so the fit is self-consistent
+rather than a number that happened to come out.
+
+**How close the solver is.** Against well-established values for this section:
+
+| | Extrapolated | Reference | Agreement |
+|---|---|---|---|
+| C<sub>l</sub> at 4° | 0.4317 | ≈0.42–0.44 (thin-aerofoil slope 2π/rad = 0.110/deg; measured slopes for NACA 0012 are 0.105–0.11/deg) | **within ~2%** |
+| C<sub>d</sub> friction | 0.0088 | 0.0093 (flat-plate turbulent, 0.074/Re<sup>0.2</sup>, both sides) | **within 6%** |
+| C<sub>d</sub> total | 0.0104 | ≈0.008–0.012 for NACA 0012 at Re = 10⁶, the upper end corresponding to fully turbulent flow from the leading edge | **inside the range**, at its upper end |
+| C<sub>d</sub> pressure | 0.0018 | ≈0 for an attached section at 4° | **correct in magnitude** |
+
+The pressure-drag result is the one that matters most. On the coarse grid it was
+0.0289 — larger than the entire real drag — and it extrapolates to 0.0018. **94%
+of it was discretisation error**, not a modelling failure: numerical diffusion
+from the first-order scheme thickens the boundary layer and wake, and a thicker
+wake is form drag.
+
+**And where it is not close.** The extrapolation agrees; *the grids themselves do
+not*. The fine grid — 105,410 cells, the largest this project runs — is still
+6% low in C<sub>l</sub> and 84% high in C<sub>d</sub>. With first-order
+convection the error falls only as h<sup>0.8</sup>, so reaching 5% in drag would
+need roughly a 30-fold refinement in each direction. The honest summary is that
+**the solver converges to the right answer at a resolution it cannot reach**,
+and the way to fix that is a convection scheme with a higher order, not a bigger
+mesh.
+
+Second-order upwind exists in the code and does not converge on these cases —
+continuity stalls around 0.2 — so its results are not quoted here. Making it
+work is the single highest-value piece of numerical work outstanding.
+
+Two further caveats:
+
+- The comparison is against standard reference *values and ranges* for NACA 0012
+  (thin-aerofoil theory, flat-plate skin friction, the accepted drag range for
+  this section at this Reynolds number), not against a digitised experimental
+  table. No wind-tunnel dataset has been read into this repository.
+- The medium-grid point stopped on its iteration limit at a continuity residual
+  of 4.9×10⁻⁶ rather than converging to 10⁻⁶; coarse and fine both converged.
+  Its forces were stable to 0.5% between iterations 1,000 and 3,000, so it is
+  used in the fit, but it is the weakest of the three points.
 
 ## Dependencies
 

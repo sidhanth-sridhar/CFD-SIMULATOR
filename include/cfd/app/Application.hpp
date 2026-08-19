@@ -82,6 +82,13 @@ struct ApplicationOptions {
   /// one, which at Re = 10^6 means around 2.5e-5 - far finer than any preset.
   double firstLayerHeight{0.0};
 
+  /// Domain extent in chords. Zero keeps the default. The far field has to be
+  /// far enough that the section's circulation has decayed there; 12 chords is
+  /// ample for a laminar case and marginal for a lifting one at high Reynolds
+  /// number, where the induced velocity falls off only as 1/r.
+  double farFieldChords{0.0};
+  double wakeChords{0.0};
+
   /// Angle of attack in degrees. Zero is a legitimate value, so a separate
   /// flag says whether one was asked for at all.
   double angleOfAttackDeg{0.0};

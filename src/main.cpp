@@ -45,6 +45,8 @@ struct Options {
   std::string turbulenceModel;
   std::string convectionScheme;
   double firstLayerHeight{0.0};
+  double farFieldChords{0.0};
+  double wakeChords{0.0};
   double angleOfAttackDeg{0.0};
   bool angleGiven{false};
   bool runPolarSweep{false};
@@ -78,6 +80,8 @@ void printUsage() {
       "      --turbulence NAME   Closure: laminar (default) or sst\n"
       "      --scheme NAME       Convection: upwind (default) or second\n"
       "      --first-layer H     First cell height off the wall, in chords\n"
+      "      --far-field N       Upstream and vertical extent, in chords\n"
+      "      --wake N            Downstream extent, in chords\n"
       "      --polar A:B:S       Sweep incidence from A to B in steps of S degrees,\n"
       "                          write the polar and exit (implies --flow)\n"
       "      --polar-csv FILE    Where the sweep writes its CSV\n"
@@ -158,6 +162,19 @@ cfd::Result<Options> parseArguments(std::span<const std::string_view> args) {
         return cfd::Error{cfd::ErrorCode::InvalidArgument,
                           "--first-layer must be a positive fraction of chord"};
       }
+    } else if (arg == "--far-field" || arg == "--wake") {
+      const bool isWake = arg == "--wake";
+      if (i + 1 >= args.size()) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          "--far-field and --wake require an extent in chords"};
+      }
+      ++i;
+      const double chords = std::strtod(std::string{args[i]}.c_str(), nullptr);
+      if (!(chords > 0.0)) {
+        return cfd::Error{cfd::ErrorCode::InvalidArgument,
+                          "the domain extent must be a positive number of chords"};
+      }
+      (isWake ? options.wakeChords : options.farFieldChords) = chords;
     } else if (arg == "--max-iterations") {
       if (i + 1 >= args.size()) {
         return cfd::Error{cfd::ErrorCode::InvalidArgument,
@@ -384,6 +401,8 @@ int main(int argc, char** argv) {
     appOptions.turbulenceModel = options.turbulenceModel;
     appOptions.convectionScheme = options.convectionScheme;
     appOptions.firstLayerHeight = options.firstLayerHeight;
+    appOptions.farFieldChords = options.farFieldChords;
+    appOptions.wakeChords = options.wakeChords;
     appOptions.angleOfAttackDeg = options.angleOfAttackDeg;
     appOptions.angleGiven = options.angleGiven;
     appOptions.runPolarSweep = options.runPolarSweep;
