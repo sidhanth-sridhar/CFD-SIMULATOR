@@ -3355,3 +3355,145 @@ $\omega = 60\nu/(\beta_1 d^2)$ outright.
 while the first cell sits inside the viscous sublayer. A model being used
 outside its range of validity should be able to say so rather than quietly
 producing numbers.
+
+## 5. Four bugs, all of which ran and converged
+
+Every defect in this phase produced a solver that *worked*: it ran, it
+converged, and it printed plausible coefficients. Only one announced itself.
+
+**The model cached a pointer into a movable solver.** `KOmegaSST` held a pointer
+to the solver's `FaceConditions`. `SimpleSolver` is movable, and the application
+moves it into the worker thread after `initialise` - leaving the model pointing
+at a moved-from vector. This is the only one that crashed, and it crashed only in
+the application, never in the tests, because the tests never move the solver. The
+interface's own comment says models must not hold pointers into solver state that
+later moves. I wrote that comment and then did exactly that in the first
+implementation behind it.
+
+**Starting k and omega uniform blew the solve up.** omega inside a boundary layer
+is five or six orders of magnitude larger than in the freestream. Starting it
+uniform meant the first iterations saw an enormous wall strain rate against a
+tiny omega, production ran away, and k exploded before the wall condition had
+been applied even once - reliably, by iteration 80, at Re = 10^6. What hid it was
+the cold retry added in Phase 7 for a completely different reason: the run
+recovered, converged, and reported a good answer, so the only sign was a warning
+line in a log nobody was reading.
+
+**omega was ten times too large in the wall cell.** Menter's
+omega = 60 nu/(beta1 d^2) is the value imposed at the *wall face* - deliberately
+over-large, as a robust Dirichlet condition on a boundary where omega is
+infinite. The near-wall *cell* takes the viscous asymptote, 6 nu/(beta1 d^2).
+
+Using 60 in the cell has an exact and unfortunate consequence. The blending
+function's viscous term is 500 nu/(d^2 omega), and substituting the wall value
+gives
+
+$$\\frac{500\\nu}{d^2} \\cdot \\frac{\\beta_1 d^2}{60\\nu} = \\frac{500\\beta_1}{60} = 0.625$$
+
+- a constant, independent of everything. So F1 = tanh(0.625^4) = 0.15 in the
+sublayer, where it should be 1, and **the model ran its k-epsilon branch hard
+against the wall - precisely what SST exists to prevent.** It still converged. It
+still produced coefficients that agreed with published values to 2%.
+
+The test that caught it was checking that F1 is about 1 near a wall, and the
+number it reported - 0.1514 - matched tanh(0.625^4) to four figures, which is
+what turned "the test is too strict" into "the coefficient is wrong".
+
+**k was imposed one cell out into the fluid.** The wall value was written into
+the near-wall cell as well as onto the wall face. The fluctuations vanish *at the
+wall*, which is a condition on the face and one the transport equation already
+applied; overwriting the cell killed the turbulence in the very cell the omega
+wall treatment reads k from.
+
+And one of my *assertions* was wrong rather than the code: I had claimed the
+near-wall cell should be less turbulent than the freestream. It is the opposite.
+Near-wall k at y+ = 1 is roughly fifty times freestream k, because that is what a
+boundary layer is.
+
+## 6. Validation, and a result that got worse when it got right
+
+Three grids refining by 1.87 in each direction, NACA 0012 at alpha = 4 degrees,
+Re = 10^6, y+ = 1.2-1.3 throughout.
+
+| Quantity | Coarse | Medium | Fine | Observed order | Extrapolated |
+|---|---|---|---|---|---|
+| C_l | 0.3572 | 0.3842 | 0.4042 | 0.48 | 0.4619 |
+| C_d | 0.0366 | 0.0260 | 0.0198 | 0.87 | 0.0113 |
+| C_d pressure | 0.0291 | 0.0180 | 0.0114 | 0.84 | 0.0019 |
+| C_d friction | 0.0075 | 0.0080 | 0.0084 | 0.29 | 0.0105 |
+
+The order column has to be read before the extrapolation column. Drag and
+pressure drag converge at 0.84-0.87, which is what first-order upwind convection
+predicts, so their extrapolations mean something. Lift and friction drag converge
+at 0.48 and 0.29 - below the formal order - so they are **not in the asymptotic
+range on any grid this project can run**, and extrapolating from a low apparent
+order inflates the correction badly.
+
+The firmest result is the pressure drag: 0.0291 on the coarse grid, larger than
+the entire real drag of the section, extrapolating to 0.0019 at a credible order.
+**94% of it was discretisation error.** Numerical diffusion thickens the boundary
+layer and the wake, and a thicker wake is form drag.
+
+The polar at Re = 10^6 stalls: lift rises to 0.935 at 14 degrees and falls away
+after, with C_m breaking nose-down from +0.017 to -0.021 across the stall. The
+shape is right; the magnitudes are low in lift and high in drag, in exactly the
+direction the grid study predicts.
+
+**The uncomfortable part.** An earlier version of that table, produced *before*
+the wall-treatment bug was found, agreed better - C_l within 2% of the reference
+rather than bracketing it. A model running its k-epsilon branch against the wall
+landed closer to the published answer than the corrected one does. If I had
+validated first and inspected later, that agreement would have been the evidence
+that the implementation was right.
+
+## 7. Status
+
+**Verified by running it**
+
+- 265/265 tests pass; zero warnings under `-DCFD_WARNINGS_AS_ERRORS=ON`.
+- The laminar closure attached is bit-identical to no closure attached, which is
+  the test that the solver depends on the interface rather than on a model.
+- k-omega SST converges at Re = 10^6 on all three grids, at y+ = 1.2-1.3, with
+  mu_t/mu up to about 150.
+- A ten-point polar at Re = 10^6 stalls at 14 degrees with a nose-down pitch
+  break.
+- Grid convergence measured over three grids with fitted orders.
+
+**Not verified, and honest limitations**
+
+- **The grids are not converged.** The finest grid this project runs is 6% low in
+  lift and 65% high in drag. Only the extrapolations agree, and only for drag.
+- **No transition model.** The boundary layer is turbulent from the leading edge,
+  which is why the drag sits at the top of the published band even when
+  extrapolated.
+- **No digitised wind-tunnel data.** The comparison is against standard reference
+  values and ranges, not a point-by-point dataset.
+- **Second-order convection does not converge**, which is why the first-order
+  scheme's error dominates everything above.
+- The fine grid still diverges once before the retry rescues it (`ISSUES.md`
+  #62).
+
+## 8. What I learned
+
+- **A bug that converges is worse than one that crashes.** Three of the four
+  defects here produced a solver that ran to a tight residual and printed
+  believable numbers. The segfault was the easy one.
+
+- **Agreement is not evidence.** The broken wall treatment matched published lift
+  to 2%; the corrected one brackets it. Had I taken agreement as confirmation I
+  would have shipped the bug and cited the agreement as proof it was not there.
+
+- **Read the exponent, not just the extrapolation.** Richardson extrapolation
+  quietly assumes the grids are in the asymptotic range. Two of the four
+  quantities here are not, and the only thing that says so is an observed order
+  well below the scheme's formal one. An extrapolated value with no order beside
+  it is a number with no error bar.
+
+- **The interface comment was right and I ignored it.** "Passed by reference each
+  iteration rather than stored, so a model cannot quietly hold a pointer into
+  solver state that later moves" - written while designing the interface, then
+  violated in the first implementation behind it, two hours later.
+
+**Next:** a convection scheme that converges at second order, on explicit
+instruction. It is the largest single source of error left, and every result in
+this phase is limited by it.

@@ -401,8 +401,10 @@ keep the file self-describing when it is opened a month later:
 alpha_deg,cl,cd,cd_pressure,cd_friction,cm,l_over_d,separation_upper_xc,separation_lower_xc,converged,iterations,continuity_residual
 ```
 
-The sweep above is checked in at
-[`examples/naca0012_re500_polar.csv`](examples/naca0012_re500_polar.csv).
+The sweeps above are checked in at
+[`examples/naca0012_re500_polar.csv`](examples/naca0012_re500_polar.csv) (laminar)
+and [`examples/naca0012_re1e6_sst_polar.csv`](examples/naca0012_re1e6_sst_polar.csv)
+(k-omega SST at Re = 10⁶).
 
 Separation columns are left empty where the surface stayed attached, rather than
 carrying a −1 that invites being plotted. `status` and `iterations` travel with
@@ -811,64 +813,128 @@ identical.
 
 ### Grid convergence and external validation
 
-This is the project's first comparison against values from outside the
-repository, and the first proper grid-convergence study. Both come from the same
-runs: NACA 0012, α = 4°, Re = 10⁶, k-ω SST, on three grids refining by a factor
-of about 1.87 in each direction. The first-layer height is held fixed at
-2.5×10⁻⁵ c across all three deliberately — y+ must stay of order 1 for the wall
-treatment, so only the surface, wake and normal point counts refine.
+The project's first comparison against values from outside the repository, and
+its first proper grid-convergence study. Both come from the same runs: NACA
+0012, α = 4°, Re = 10⁶, k-ω SST, on three grids refining by about 1.87 in each
+direction. The first-layer height is held fixed at 2.5×10⁻⁵ c across all three
+deliberately — y+ must stay of order 1 for the wall treatment, so only the
+surface, wake and normal point counts refine. All three achieved y+ = 1.2–1.3.
 
 | Quantity | Coarse (8,658) | Medium (30,530) | Fine (105,410) | Observed order | Richardson extrapolation |
 |---|---|---|---|---|---|
-| C<sub>l</sub> | 0.3594 | 0.3870 | 0.4041 | 0.77 | **0.4317** |
-| C<sub>d</sub> | 0.0358 | 0.0252 | 0.0191 | 0.86 | **0.0104** |
-| C<sub>d</sub> pressure | 0.0289 | 0.0178 | 0.0113 | 0.84 | **0.0018** |
-| C<sub>d</sub> friction | 0.0069 | 0.0074 | 0.0078 | 0.50 | **0.0088** |
+| C<sub>l</sub> | 0.3572 | 0.3842 | 0.4042 | **0.48** | 0.4619 |
+| C<sub>d</sub> | 0.0366 | 0.0260 | 0.0198 | 0.87 | 0.0113 |
+| C<sub>d</sub> pressure | 0.0291 | 0.0180 | 0.0114 | 0.84 | 0.0019 |
+| C<sub>d</sub> friction | 0.0075 | 0.0080 | 0.0084 | **0.29** | 0.0105 |
 
-**The observed order is ~0.8**, which is first order. That is exactly what the
-first-order upwind convection scheme predicts, so the fit is self-consistent
-rather than a number that happened to come out.
+**Read the order column before the extrapolation column.** Drag and pressure
+drag converge at order ≈0.85, which is what the first-order upwind convection
+scheme predicts — those two are behaving as the discretisation says they should,
+and their extrapolations are meaningful. Lift and friction drag converge at 0.48
+and 0.29, well *below* the formal order, which means they are **not in the
+asymptotic range on these grids**. A Richardson extrapolation from a low apparent
+order inflates the correction badly, so those two extrapolated figures are
+reported for completeness and should not be treated as converged values.
 
-**How close the solver is.** Against well-established values for this section:
+**How close the solver is.**
 
-| | Extrapolated | Reference | Agreement |
-|---|---|---|---|
-| C<sub>l</sub> at 4° | 0.4317 | ≈0.42–0.44 (thin-aerofoil slope 2π/rad = 0.110/deg; measured slopes for NACA 0012 are 0.105–0.11/deg) | **within ~2%** |
-| C<sub>d</sub> friction | 0.0088 | 0.0093 (flat-plate turbulent, 0.074/Re<sup>0.2</sup>, both sides) | **within 6%** |
-| C<sub>d</sub> total | 0.0104 | ≈0.008–0.012 for NACA 0012 at Re = 10⁶, the upper end corresponding to fully turbulent flow from the leading edge | **inside the range**, at its upper end |
-| C<sub>d</sub> pressure | 0.0018 | ≈0 for an attached section at 4° | **correct in magnitude** |
+| | Fine grid | Extrapolated | Reference | Verdict |
+|---|---|---|---|---|
+| C<sub>l</sub> at 4° | 0.4042 | 0.4619 | ≈0.42–0.44 (thin-aerofoil slope 2π/rad = 0.110/deg; measured NACA 0012 slopes are 0.105–0.11/deg) | the reference sits **between** the two — bracketed, not pinned |
+| C<sub>d</sub> friction | 0.0084 | 0.0105 | 0.0093 (flat plate, 0.074/Re<sup>0.2</sup>, both sides) | again **bracketed** |
+| C<sub>d</sub> total | 0.0198 | 0.0113 | ≈0.008–0.012 for this section at this Reynolds number, upper end for fully turbulent flow from the leading edge | extrapolation **inside the range**; the fine grid is 65% high |
+| C<sub>d</sub> pressure | 0.0114 | 0.0019 | ≈0 for an attached section at 4° | **correct in magnitude** |
 
-The pressure-drag result is the one that matters most. On the coarse grid it was
-0.0289 — larger than the entire real drag — and it extrapolates to 0.0018. **94%
-of it was discretisation error**, not a modelling failure: numerical diffusion
-from the first-order scheme thickens the boundary layer and wake, and a thicker
-wake is form drag.
+The pressure-drag result is the firmest. On the coarse grid it was 0.0291 —
+larger than the whole real drag — and it extrapolates to 0.0019 at a credible
+order. **94% of it is discretisation error**, not modelling error: numerical
+diffusion from the first-order scheme thickens the boundary layer and wake, and
+a thicker wake is form drag.
 
-**And where it is not close.** The extrapolation agrees; *the grids themselves do
-not*. The fine grid — 105,410 cells, the largest this project runs — is still
-6% low in C<sub>l</sub> and 84% high in C<sub>d</sub>. With first-order
-convection the error falls only as h<sup>0.8</sup>, so reaching 5% in drag would
-need roughly a 30-fold refinement in each direction. The honest summary is that
-**the solver converges to the right answer at a resolution it cannot reach**,
-and the way to fix that is a convection scheme with a higher order, not a bigger
-mesh.
+**And where it is not close.** The extrapolations for drag agree; the grids
+themselves do not, and for lift nothing agrees to better than being bracketed.
+The fine grid — 105,410 cells, the largest this project runs — is 6% low in
+C<sub>l</sub> and 65% high in C<sub>d</sub>. With first-order convection the
+error falls as h<sup>0.87</sup> at best, so reaching 5% in drag would need
+roughly a 20-fold refinement in each direction. **The solver converges towards
+the right answer at a resolution it cannot reach.** The fix is a
+higher-order convection scheme, not a bigger mesh: second-order upwind exists in
+the code and does not converge on these cases (continuity stalls around 0.2), so
+its results are not quoted. Making it work is the highest-value numerical work
+outstanding.
 
-Second-order upwind exists in the code and does not converge on these cases —
-continuity stalls around 0.2 — so its results are not quoted here. Making it
-work is the single highest-value piece of numerical work outstanding.
-
-Two further caveats:
+Three further caveats, stated because they bear on how much weight the table
+carries:
 
 - The comparison is against standard reference *values and ranges* for NACA 0012
-  (thin-aerofoil theory, flat-plate skin friction, the accepted drag range for
-  this section at this Reynolds number), not against a digitised experimental
-  table. No wind-tunnel dataset has been read into this repository.
-- The medium-grid point stopped on its iteration limit at a continuity residual
-  of 4.9×10⁻⁶ rather than converging to 10⁻⁶; coarse and fine both converged.
-  Its forces were stable to 0.5% between iterations 1,000 and 3,000, so it is
-  used in the fit, but it is the weakest of the three points.
+  — thin-aerofoil theory, flat-plate skin friction, and the accepted drag band
+  for this section at this Reynolds number. **No wind-tunnel dataset has been
+  digitised into this repository**, so this is not a point-by-point comparison
+  against measured data.
+- The medium point stopped on its iteration limit at a continuity residual of
+  4.7×10⁻⁶ rather than reaching 10⁻⁶; coarse and fine both converged. Its forces
+  were stable to well under a percent over the last 2,000 iterations, so it is
+  used in the fit, but it is the weakest of the three points and the fitted
+  orders are sensitive to it.
+- An earlier version of this table, produced before the wall-treatment bug in
+  [`ISSUES.md`](ISSUES.md) #60 was found, agreed *better* with the references —
+  C<sub>l</sub> within 2% — while the model was silently running its k-ε branch
+  against the wall. Better agreement from a wrong model is a caution worth
+  recording: the corrected solver reports a less flattering result, and that is
+  the one to believe.
 
-## Dependencies
+### The polar at Re = 10⁶
+
+`--polar 0:18:2` on the medium grid with k-ω SST, ten points, nine converged to
+10⁻⁶:
+
+| α | C<sub>l</sub> | C<sub>d</sub> | C<sub>d</sub> pressure | C<sub>d</sub> friction | C<sub>m</sub> c/4 | L/D |
+|---|---|---|---|---|---|---|
+| 0° | −0.0008 | 0.0205 | 0.0120 | 0.0084 | +0.0001 | — |
+| 2° | 0.1953 | 0.0219 | 0.0135 | 0.0083 | +0.0019 | 8.9 |
+| 4° | 0.3839 | 0.0260 | 0.0180 | 0.0080 | +0.0048 | 14.8 |
+| 6° | 0.5545 | 0.0334 | 0.0259 | 0.0076 | +0.0090 | **16.6** |
+| 8° | 0.7067 | 0.0440 | 0.0370 | 0.0070 | +0.0138 | 16.0 |
+| 10° | 0.8280 | 0.0584 | 0.0520 | 0.0064 | +0.0182 | 14.2 |
+| 12° | 0.9084 | 0.0782 | 0.0725 | 0.0057 | +0.0172 | 11.6 |
+| 14° | **0.9350** | 0.1077 | 0.1029 | 0.0049 | +0.0040 | 8.7 |
+| 16° | 0.9105 | 0.1510 | 0.1470 | 0.0041 | −0.0210 | 6.0 |
+| 18° | 0.8615 | 0.2086 | 0.2052 | 0.0034 | −0.0506 | 4.1 |
+
+**The section stalls.** Lift rises almost linearly to a maximum of 0.935 at 14°
+and then falls — 0.911 at 16°, 0.862 at 18°. That is a genuine C<sub>l,max</sub>
+and post-stall lift loss, and nothing in the code knows it should happen: it
+falls out of the turbulence model letting the boundary layer separate under an
+adverse gradient. The laminar solver could never produce it, because at Re = 500
+the flow separates almost immediately and lift never gets the chance to build.
+
+Four things in that table are physics, none of them asserted anywhere:
+
+- **C<sub>l</sub> = −0.0008 at zero incidence** on a symmetric section.
+- **The lift curve bends over and breaks** at 14°.
+- **C<sub>m</sub> reverses sign at the stall**, +0.017 at 12° to −0.021 at 16°:
+  the nose-down pitch break that a stalling section is known for, as the centre
+  of pressure moves aft when the suction peak collapses.
+- **Friction drag falls monotonically** while pressure drag grows by a factor of
+  seventeen — the separated region spreading forward, exactly the trade seen in
+  the laminar polars but now at a realistic Reynolds number.
+
+Against published values for NACA 0012 at this Reynolds number:
+
+| | Computed | Reference | |
+|---|---|---|---|
+| Lift-curve slope near 0° | 0.098/deg | 0.105–0.11/deg | ~8–11% low |
+| Stall angle | 14° | ≈14–16° | **in range** |
+| C<sub>l,max</sub> | 0.935 | ≈1.1–1.3 | 15–30% low |
+| C<sub>d</sub> at 0° | 0.0205 | ≈0.008 | 2.5× high |
+
+The shape is right and the magnitudes are not, in the direction the grid study
+predicts: this is the medium grid, which that study shows is 65% high in drag
+and short of the asymptotic range in lift. The same numerical diffusion that
+inflates drag also thickens the boundary layer and caps peak lift, so a low
+C<sub>l,max</sub> and a high C<sub>d</sub> are one error, not two.
+
+## Dependencies## Dependencies
 
 | Library | Version | Role | Fetched |
 |---|---|---|---|
@@ -882,7 +948,7 @@ reproduces the exact same sources or fails loudly.
 
 ## Roadmap
 
-Phases 0 to 7 are complete. Later phases build on them in order:
+Phases 0 to 8 are complete. Later phases build on them in order:
 
 1. ~~NACA 4-digit geometry generation~~ — done
 2. ~~Mesh generation around the section~~ — done
@@ -890,9 +956,10 @@ Phases 0 to 7 are complete. Later phases build on them in order:
 4. ~~Viscous flow around an aerofoil: Cp, Cf, wall shear, separation~~ — done
 5. ~~Force and moment integration (lift, drag, moment coefficients)~~ — done
 6. ~~Angle-of-attack sweeps and polars~~ — done
-7. Reynolds averaging (RANS)
-8. k-ω SST turbulence closure
-9. Vortex structures and stall behaviour
+7. ~~Reynolds averaging and a k-ω SST closure~~ — done
+8. A convection scheme that converges at second order — the single largest source of error left
+9. Transition modelling; comparison against digitised wind-tunnel data
+10. Vortex structures and post-stall behaviour
 
 ## Documentation
 

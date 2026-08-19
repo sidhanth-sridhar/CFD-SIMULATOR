@@ -27,44 +27,26 @@ Severity is about consequence, not effort:
 
 ## Open
 
-### #3 — No grid-convergence study of the force coefficients
-**Severity:** degraded · **Found:** Phase 6 · **Area:** validation · **Status:** measured, see below
-
-The coefficients are shown to settle in *iteration* — 700 versus 1,400
-iterations agree to 2×10⁻² — but that is a different claim from settling in
-*mesh resolution*.
-
-Measured at α = 8°, Re = 500 (see `README.md` for the table): C<sub>l</sub>
-moves by well under a percent between coarse and medium, C<sub>d</sub> by a few
-percent. So the lift is grid-independent at the resolutions used and the drag is
-not fully. Every coefficient quoted in the documentation is from the coarse
-grid, and should be read as carrying a few percent of grid error in
-C<sub>d</sub>.
-
-Left open rather than closed because a proper study would fit an observed order
-of convergence over three or more systematically refined grids, and this is
-three presets that differ in more than one way at once.
-
----
-
-### #58 — A turbulent solve can diverge in its first hundred iterations
+### #62 — The finest grid still diverges once before settling
 **Severity:** degraded · **Found:** Phase 8 · **Area:** solver
 
-Starting k-omega SST from a uniform field on the medium C-grid at Re = 10⁶
-diverged at iteration 74. The cold retry added in Phase 7 (#54) recovered it and
-the run then converged normally, so the answer is not affected — but relying on
-a retry to get past the first hundred iterations is not a fix.
+Seeding omega from the wall distance ([#58](#fixed)) removed the startup blow-up
+on the coarse and medium grids and pushed it from iteration ~84 to ~168 on the
+fine one, but did not eliminate it there. The fine C-grid at Re = 10⁶ still
+diverges once and is recovered by the Phase 7 cold retry, after which it
+converges normally to 10⁻⁶ in 1,367 iterations.
 
-**Cause.** k and omega are initialised to their freestream values *everywhere*,
-including inside the boundary layer where omega should be five or six orders of
-magnitude larger. The first iterations therefore see an enormous wall strain
-rate against a tiny omega, the production term is huge, and k runs away before
-the wall treatment has had a chance to impose the sublayer value.
+The answer is unaffected - a retry that converges is as good as a first attempt
+that converges - but relying on a rescue is not the same as not needing one, and
+on a grid finer still it may not recover at all.
 
-**Fix direction.** Seed omega from the wall distance at `initialise` rather than
-waiting for the first `update` to apply the wall condition — the analytic
-sublayer value 60ν/(β₁d²) is already known there, and starting from it removes
-the transient entirely.
+**Likely cause.** The fine grid has cell aspect ratios above 10⁵ near the wall.
+The turbulence equations are under-relaxed at 0.5 by default, which is evidently
+not cautious enough there while the mean flow is still establishing itself.
+
+**Fix direction.** Ramp the turbulence relaxation over the first few hundred
+iterations, or hold the model off entirely until the mean-flow residuals have
+dropped a decade. Both are standard; neither has been tried here.
 
 ---
 
@@ -167,6 +149,16 @@ Not defects. Listed so they are not mistaken for any.
 | 45 | The loop free-ran at ~117 fps during a solve, taking a core from it | Vsync normally caps this, but not when the window is hidden or occluded — precisely when spinning is most wasteful and least visible | Wait out the remainder of a 60 Hz interval with `glfwWaitEventsTimeout`, so input still returns early |
 | 46 | The 60 fps cap delivered 41 fps | The interval was measured from the *end* of the previous frame, so it was added on top of the frame's own cost | Measure from the start of the previous frame |
 | 47 | **The shaded field drew at half scale in a ragged patch** in the middle of the viewport | The offscreen target is sized in framebuffer pixels and the camera scale is in ImGui points; on a Retina display those differ by 2×. The ragged edge was the giveaway: cells were culled against the *camera's* visible bounds while being drawn into a texture covering twice that area, so the cull boundary appeared inside the picture | Carry the scale in framebuffer pixels throughout. The shape of the artefact named the bug faster than reading the code would have |
+
+### Phase 8 — turbulence
+
+| # | Issue | Root cause | Fix |
+|---|---|---|---|
+| 3 | **No grid-convergence study of the force coefficients** | The coefficients were only ever shown to settle in *iteration*, never in *mesh resolution*, and every number quoted came from a single grid | Run at three grids refining by 1.87 in each direction and fit an observed order. Result: **C<sub>d</sub> and pressure drag converge at order 0.84–0.87**, matching the first-order convection scheme, and pressure drag extrapolates to 0.0019 from 0.0291 on the coarse grid - so 94% of it was discretisation error. **C<sub>l</sub> and friction drag converge at 0.48 and 0.29**, below the formal order, so those two are *not* in the asymptotic range on any grid this project can run and their extrapolations are not trustworthy. That is itself the answer the study was asked for, and it is documented in `README.md` |
+| 59 | **The model segfaulted in the application but not in tests** | `KOmegaSST` cached a pointer to the solver's `FaceConditions`. `SimpleSolver` is *movable*, and the application moves it into the worker thread after `initialise` - leaving the model pointing at a moved-from vector. The tests never moved the solver, so they passed. The interface's own comment said models must not hold pointers into solver state that later moves, and the first implementation behind it did exactly that | Boundary conditions travel through `TurbulenceContext` every iteration, like everything else the model needs |
+| 58 | **A turbulent solve diverged in its first hundred iterations** | k and omega were initialised to freestream values *everywhere*, including inside the boundary layer where omega should be five or six orders of magnitude larger. The first iterations saw an enormous wall strain rate against a tiny omega, production ran away, and k exploded before the wall condition had been applied once. Reliably fatal at Re = 10⁶ on the medium and fine grids; the Phase 7 cold retry (#54) rescued it, which is how it stayed hidden | Seed omega from the analytic sublayer solution at `initialise`, taking the larger of that and the freestream value. **Improved, not eliminated** - see [#62](#62--the-finest-grid-still-diverges-once-before-settling). The converged answer is unchanged, which is the right outcome for a change to the starting field |
+| 60 | **omega was ten times too large in the wall cell, silently disabling SST's blending** | Menter's ω = 60ν/β₁d² is the value imposed at the *wall face*, deliberately over-large as a robust Dirichlet condition where omega is infinite. The first *cell* takes the viscous asymptote ω = 6ν/β₁d². With 60 in the cell, the blending term 500ν/(d²ω) collapses to the constant 500β₁/60 = 0.625, pinning F1 at tanh(0.625⁴) = 0.15 in the sublayer where it should be 1 - so **the model ran its k-epsilon branch hard against the wall, which is exactly what SST exists to prevent**. It still converged and still produced plausible coefficients, which is what made it dangerous | The near-wall cell takes the viscous asymptote blended with the log-layer form, √(ω_vis² + ω_log²). Caught by the F1 test, not by inspection; friction drag moved 8.5% toward flat-plate theory once fixed |
+| 61 | k was imposed one cell out into the fluid | The wall value of k was written into the near-wall *cell* as well as onto the wall face. The fluctuations vanish *at the wall* - a condition on the face, which the transport equation already applies - so overwriting the cell killed the turbulence in the very cell the omega wall treatment reads k from | The cell value is solved; only the face is imposed |
 
 ### Solver correctness
 
